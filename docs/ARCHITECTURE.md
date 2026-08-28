@@ -1,14 +1,26 @@
 # Système de monitoring et de commande — Fourgon aménagé
 
 **ÉTAPE 1 — Architecture proposée (aucun code applicatif).**
-Document à valider avant tout développement.
+Révision 2 — intègre les corrections demandées après première relecture.
 
 Cible : Raspberry Pi 4, Raspberry Pi OS (64 bits), écran tactile 4,3"–5"
-(résolution de référence **800 × 480**), fonctionnement 100 % local, sans Internet.
+(**modèle et résolution non choisis** — mise en page adaptative), fonctionnement
+100 % local, sans Internet.
 
 Convention utilisée dans tout le document :
 tout élément matériel non confirmé est marqué **MATERIEL À INTEGRER PLUS TARD**
 et n'existe côté logiciel que sous forme d'interface abstraite.
+
+> **Journal des révisions**
+> **Rév. 2** — modèle d'acquisition à threads séparés avec délais d'expiration et
+> chien de garde ; liaison SmartShunt figée en VE.Direct filaire ; historique
+> désactivé par défaut (5 min / 24 h) ; seuils de chauffage explicitement
+> présentés comme exemples, Local batterie et Cabine à définir ; séparation
+> **état commandé / état confirmé** pour les clapets ; repli sur perte de sonde
+> configurable par circuit ; règles de capacité par réservoir ; écran adaptatif
+> 4,3"–5" ; RTC, avertisseur sonore et fonctions optionnelles retirés du
+> périmètre initial.
+> **Rév. 1** — proposition initiale.
 
 ---
 
@@ -22,11 +34,11 @@ Quatre couches strictement séparées, avec une dépendance à sens unique :
         ┌──────────────────────────────────────────────┐
         │  UI (PyQt5)  — Accueil, Paramètres, Sim      │   ne connaît AUCUN matériel
         └───────────────▲──────────────────┬───────────┘
-        snapshot (signal)│                  │ commandes (queue)
+        snapshot (signal)│                  │ commandes (file)
         ┌───────────────┴──────────────────▼───────────┐
         │  CORE — logique métier                       │   ne connaît AUCUN matériel
         │  calibration · chauffage · alertes ·         │
-        │  historique · état · santé                   │
+        │  historique · état · santé des équipements   │
         └───────────────▲──────────────────┬───────────┘
                  valeurs│                  │ ordres
         ┌───────────────┴──────────────────▼───────────┐
@@ -41,33 +53,113 @@ Quatre couches strictement séparées, avec une dépendance à sens unique :
 
 Règles non négociables :
 
-1. `core/` et `ui/` n'importent **jamais** `hal/real/`. Ils ne connaissent que
-   `hal/interfaces.py`.
+1. `core/` et `ui/` n'importent **jamais** `hal/real/` ni `hal/sim/`. Ils ne
+   connaissent que `hal/interfaces.py`. Un test automatique le vérifie.
 2. L'instanciation du matériel réel ou simulé se fait **uniquement** dans
    `hal/factory.py`, appelé par le point d'entrée `app.py` (composition root).
 3. Passer de la simulation au matériel réel = changer une clé de configuration
    ou un argument de ligne de commande. Aucune autre ligne de code ne change.
-4. Toute lecture matérielle est faite dans un thread de fond. L'interface
-   graphique ne fait **aucune** I/O.
+4. **L'interface graphique ne détient aucune référence vers le HAL.** Elle ne
+   reçoit qu'un `SystemSnapshot` déjà calculé et ne peut qu'empiler des
+   commandes dans une file. L'absence d'I/O matérielle dans le thread graphique
+   est donc structurelle, pas une question de discipline.
 
-### 1.2 Modèle de threads
+### 1.2 Modèle d'acquisition — un thread par famille de matériel
 
-| Thread | Rôle | Cadence |
-|---|---|---|
-| **Thread UI (principal Qt)** | affichage, saisies tactiles | rafraîchissement 2 Hz |
-| **Thread acquisition** | lecture capteurs, logique chauffage, alertes | tick 1 s, tâches à périodes propres |
-| **Thread historique** | écriture SQLite par lots | réveil toutes les N minutes |
+**Correction rév. 2.** Un thread d'acquisition unique ne garantit pas qu'une
+lecture lente ne retarde pas les suivantes : un `try/except` attrape une panne,
+il n'interrompt pas une lecture qui dure. La lecture des cinq DS18B20 est le cas
+typique (conversion de l'ordre de la seconde par sonde) et ne doit en aucun cas
+retarder la logique de chauffage ou l'affichage.
 
-Le thread d'acquisition exécute un **ordonnanceur coopératif** : chaque tâche a
-sa propre période (températures 10 s, niveaux 2 s, batterie 1 s, chauffage 5 s).
-Une tâche lente ou en erreur ne bloque pas les autres : chaque tâche est
-exécutée dans un `try/except` avec chronomètre et compteur d'échecs.
+Le modèle retenu est volontairement simple : **un thread par famille de
+matériel**, un slot de valeur partagé par famille, et un thread de contrôle qui
+ne fait **aucune** I/O.
 
-Communication inter-threads :
-* **acquisition → UI** : un objet immuable `SystemSnapshot` publié via un signal
-  Qt (connexion `QueuedConnection`, thread-safe par construction).
-* **UI → acquisition** : file `queue.Queue` de commandes (`Command`), consommée
-  au début de chaque tick. Aucune UI ne pilote directement une vanne.
+| Thread | Rôle | Cadence | I/O matérielle |
+|---|---|---|---|
+| **UI** (principal Qt) | affichage, saisies tactiles | 2 Hz | **non** (aucune référence au HAL) |
+| `temp_worker` | 5 × DS18B20 sur 1-Wire | période 10 s | oui — lente |
+| `level_worker` | 3 voies de niveau | période 2 s | oui — rapide |
+| `battery_worker` | SmartShunt VE.Direct (série) | lecture au fil de l'eau | oui — bloquante, avec délai d'expiration |
+| `valve_worker` | exécution des ordres de clapets | sur file | oui |
+| `control_worker` | commandes, chauffage, alertes, snapshot | 1 Hz | **non** |
+| `history_worker` | écriture SQLite par lots | selon période | non (disque uniquement) |
+
+Six threads en fonctionnement normal, sept si l'historique est activé. Le thread
+d'historique **n'est pas créé** quand l'historique est désactivé.
+
+#### Les trois garanties demandées
+
+**a) Délai d'expiration sur toute I/O matérielle.**
+Le contrat de `hal/interfaces.py` impose que **toute méthode de lecture ou de
+commande rende la main avant `timeout_s`, ou lève `HardwareTimeout`**. Chaque
+pilote reçoit son délai à la construction, depuis la configuration :
+
+* liaison série VE.Direct → délai natif de la bibliothèque série ;
+* lecture 1-Wire → lecture avec échéance, abandon et `HardwareTimeout` au-delà ;
+* convertisseur de niveaux et pilotes de clapets → délai imposé de la même
+  façon dès que le matériel sera choisi (**MATERIEL À INTEGRER PLUS TARD**, mais
+  le contrat, lui, est déjà figé).
+
+**b) Aucune lecture lente ne peut bloquer une autre acquisition.**
+Les familles sont sur des threads distincts : une lecture 1-Wire qui dure quatre
+secondes n'a aucun effet sur les niveaux, la batterie, le chauffage ou
+l'affichage. Le `control_worker` ne lit jamais un capteur : il lit des
+**valeurs déjà en mémoire** dans les slots, opération immédiate et sans verrou
+long.
+
+```python
+class LatestValue:                 # un par famille de matériel
+    def set(self, value) -> None            # écrit par le worker
+    def get(self) -> tuple[Any | None, float]   # (valeur, âge en secondes) — lecture immédiate
+    def mark_fault(self, reason: str) -> None
+```
+
+**c) Aucune I/O matérielle dans le thread graphique.**
+Garanti par construction (règle 4 du §1.1) : l'UI n'a pas d'objet HAL à sa
+disposition. Un appui sur `OUVRIR` empile une commande ; c'est le
+`valve_worker` qui l'exécute, jamais Qt.
+
+#### Chien de garde et limite assumée
+
+Un thread Python bloqué dans un appel système **ne peut pas être tué de
+force** : aucune bibliothèque ne change cela. L'architecture le reconnaît et le
+contient au lieu de prétendre l'éviter :
+
+```python
+class HardwareWorker(threading.Thread):
+    def __init__(self, name, read_fn, period_s, timeout_s, watchdog_factor, slot): ...
+    def run(self) -> None: ...          # boucle : lecture sous échéance → slot.set()
+                                        # exception → slot.mark_fault(), sans journal répété
+    def health(self) -> WorkerHealth: ...   # dernier succès, échecs consécutifs, bloqué ou non
+    def request_stop(self) -> None: ...
+
+class WorkerSupervisor:
+    def register(self, worker: HardwareWorker) -> None: ...
+    def check(self, now: float) -> list[WorkerHealth]: ...   # appelé à chaque tick de contrôle
+    def restart_if_stuck(self, worker) -> None: ...
+```
+
+Comportement en cas de blocage durable d'un worker (au-delà de
+`watchdog_factor × period_s`, facteur 3 par défaut) :
+
+1. les valeurs de cette famille passent en `STALE` puis `FAULT` ;
+2. une **alerte technique** est levée (« Sondes de température ne répondent
+   plus ») ;
+3. le superviseur crée un worker de remplacement ; le thread bloqué est un
+   thread *daemon*, il est abandonné et n'empêchera jamais l'arrêt du
+   programme ;
+4. un seul remplaçant à la fois, avec temporisation croissante plafonnée : pas
+   de création de threads en rafale ;
+5. **le reste de l'application continue normalement** — c'est exactement le
+   comportement recherché.
+
+*Réserve, non implémentée à ce stade :* si un pilote réel se révélait
+réellement impossible à interrompre (blocage définitif et répété), la famille
+concernée serait déplacée dans un **sous-processus**, tuable, derrière la même
+interface. Aucun autre module ne changerait. Cette option est notée ici pour
+mémoire ; elle n'est pas retenue tant qu'aucun matériel ne la justifie.
 
 ### 1.3 Machine à états et sécurité
 
@@ -75,9 +167,9 @@ Communication inter-threads :
   `OK` · `STALE` (donnée trop vieille) · `FAULT` (erreur de lecture) ·
   `ABSENT` (capteur non configuré / non détecté).
 * L'UI affiche `--` pour `ABSENT`/`STALE` et `Erreur capteur` pour `FAULT`.
-* La logique chauffage refuse de commander en AUTO sur une température non `OK` :
-  comportement configurable `heating.on_sensor_loss` (`hold` par défaut) +
-  alerte technique. **Point à valider (voir §10, R-07).**
+* La logique de chauffage n'applique jamais les seuils sur une température qui
+  n'est pas `OK` : elle applique le **repli configuré pour ce circuit**
+  (voir §5 et §10, R-07) et lève une alerte technique.
 
 ---
 
@@ -92,7 +184,7 @@ Project/
 │
 ├── docs/
 │   ├── ARCHITECTURE.md                # ce document
-│   ├── HARDWARE_TODO.md               # liste des points « MATERIEL À INTEGRER PLUS TARD »
+│   ├── HARDWARE_TODO.md               # points « MATERIEL À INTEGRER PLUS TARD »
 │   ├── MOCKUP_ACCUEIL.md
 │   ├── MOCKUP_PARAMETRES.md
 │   └── INSTALL_RASPBERRY.md
@@ -103,32 +195,34 @@ Project/
 ├── deploy/
 │   ├── vanmonitor.service             # unité systemd (autostart + restart)
 │   ├── install.sh                     # installation/dépendances
+│   ├── 99-vedirect.rules              # règle udev : nom stable pour l'interface VE.Direct/USB
 │   └── kiosk.md                       # notes plein écran / masquage curseur
 │
 ├── src/vanmonitor/
 │   ├── __init__.py
 │   ├── __main__.py                    # python -m vanmonitor
 │   ├── cli.py                         # arguments : --sim, --windowed, --config
-│   ├── app.py                         # COMPOSITION ROOT : assemble config + HAL + core + UI
-│   ├── constants.py                   # énumérations : ZoneId, CircuitId, TankId, Status, ValveState, Mode
+│   ├── app.py                         # COMPOSITION ROOT : config + HAL + workers + core + UI
+│   ├── constants.py                   # énumérations
 │   ├── models.py                      # dataclasses immuables du snapshot
 │   │
 │   ├── config/
 │   │   ├── __init__.py
 │   │   ├── defaults.py                # dictionnaire des valeurs par défaut
 │   │   ├── schema.py                  # validation + migration de version
-│   │   └── store.py                   # ConfigStore : chargement, écriture atomique, sauvegarde différée
+│   │   └── store.py                   # ConfigStore : écriture atomique différée
 │   │
 │   ├── hal/
 │   │   ├── __init__.py
 │   │   ├── interfaces.py              # TemperatureSensor, LevelSensor, ADCInterface,
-│   │   │                              # SmartShuntInterface, ValveDriver, ClockSource
+│   │   │                              # SmartShuntInterface, ValveDriver + contrat de délai
 │   │   ├── factory.py                 # build_hal(config, simulation: bool) -> HalBundle
 │   │   ├── real/
 │   │   │   ├── __init__.py
-│   │   │   ├── ds18b20.py             # 1-Wire via /sys/bus/w1/devices
+│   │   │   ├── ds18b20.py             # 1-Wire via /sys/bus/w1/devices, lecture sous échéance
 │   │   │   ├── adc_level.py           # MATERIEL À INTEGRER PLUS TARD (convertisseur non choisi)
-│   │   │   ├── smartshunt_link.py     # MATERIEL À INTEGRER PLUS TARD (liaison non choisie)
+│   │   │   ├── smartshunt_vedirect.py # VE.Direct filaire → interface USB → port série
+│   │   │   ├── vedirect_parser.py     # décodage des trames, séparé de la liaison (testable seul)
 │   │   │   └── valve_driver.py        # MATERIEL À INTEGRER PLUS TARD (actionneur non choisi)
 │   │   └── sim/
 │   │       ├── __init__.py
@@ -136,14 +230,15 @@ Project/
 │   │       ├── mock_temperature.py    # MockTemperatureSensor
 │   │       ├── mock_level.py          # MockLevelSensor
 │   │       ├── mock_smartshunt.py     # MockSmartShuntInterface
-│   │       └── mock_valve.py          # MockValveDriver
+│   │       └── mock_valve.py          # MockValveDriver (avec et sans retour de position)
 │   │
 │   ├── core/
 │   │   ├── __init__.py
-│   │   ├── state.py                   # StateStore : dernier snapshot, accès verrouillé
-│   │   ├── scheduler.py               # AcquisitionWorker + PeriodicTask
+│   │   ├── state.py                   # StateStore + LatestValue
+│   │   ├── workers.py                 # HardwareWorker + WorkerSupervisor + WorkerHealth
+│   │   ├── control_loop.py            # ControlWorker : tick 1 s, aucune I/O matérielle
 │   │   ├── commands.py                # CommandBus + dataclasses de commandes
-│   │   ├── health.py                  # suivi fraîcheur/fautes, anti-rebond
+│   │   ├── health.py                  # fraîcheur, fautes, anti-rebond
 │   │   ├── calibration.py             # CalibrationTable (interpolation multipoints)
 │   │   ├── filters.py                 # filtre médian + moyenne exponentielle
 │   │   ├── temperature_service.py     # TemperatureService
@@ -151,13 +246,14 @@ Project/
 │   │   ├── battery_service.py         # BatteryService (SmartShunt)
 │   │   ├── heating.py                 # HeatingCircuit + HeatingController (hystérésis)
 │   │   ├── alerts.py                  # AlertEngine + règles
-│   │   └── history.py                 # HistoryRecorder (SQLite, désactivable)
+│   │   └── history.py                 # HistoryRecorder (SQLite, désactivé par défaut)
 │   │
 │   ├── ui/
 │   │   ├── __init__.py
 │   │   ├── main_window.py             # QStackedWidget : Accueil / Paramètres
-│   │   ├── theme.py                   # palette, tailles, polices
+│   │   ├── theme.py                   # échelle typographique calculée depuis la taille réelle
 │   │   ├── style.qss                  # feuille de style sombre
+│   │   ├── layout_profile.py          # profil compact / standard choisi à l'exécution
 │   │   ├── home_page.py
 │   │   ├── settings_page.py           # rail latéral + pages de réglages
 │   │   ├── settings/
@@ -170,24 +266,27 @@ Project/
 │   │   │   ├── tile.py                # tuile de mesure (grand chiffre + unité)
 │   │   │   ├── bar_gauge.py           # jauge horizontale
 │   │   │   ├── temperature_list.py
-│   │   │   ├── circuit_row.py         # ligne chauffage (nom, mode, état, actions)
+│   │   │   ├── circuit_row.py         # ligne chauffage : commandé vs confirmé
 │   │   │   ├── alert_bar.py
-│   │   │   ├── numeric_keypad.py      # pavé numérique tactile (saisie de seuils)
-│   │   │   └── touch_controls.py      # boutons/bascules ≥ 64 px
-│   │   └── sim_panel.py               # fenêtre de simulation (curseurs + interrupteurs de panne)
+│   │   │   ├── numeric_keypad.py      # pavé numérique tactile
+│   │   │   └── touch_controls.py      # boutons/bascules dimensionnés en millimètres
+│   │   └── sim_panel.py               # fenêtre de simulation
 │   │
 │   └── util/
 │       ├── __init__.py
 │       ├── logging_setup.py           # logs vers journald, niveau configurable
 │       ├── ratelimit.py               # anti-spam de logs (dédoublonnage par message)
-│       └── timebase.py                # horloge monotone pour la logique, horloge murale pour l'affichage
+│       └── timebase.py                # horloge monotone pour la logique
 │
 └── tests/
-    ├── test_calibration.py            # interpolation, hors plage, incohérences
-    ├── test_heating.py                # hystérésis, anti-cyclage, pannes capteur
-    ├── test_alerts.py                 # seuils, réarmement, alertes techniques
-    ├── test_config_store.py           # écriture atomique, migration, fichier corrompu
+    ├── test_calibration.py            # interpolation, hors plage, incohérences, capacité déduite
+    ├── test_heating.py                # hystérésis, anti-cyclage, repli par circuit
+    ├── test_valve_state.py            # commandé vs confirmé, avec et sans retour de position
+    ├── test_workers.py                # délai d'expiration, worker bloqué, redémarrage
+    ├── test_alerts.py
+    ├── test_config_store.py
     ├── test_tank_service.py
+    ├── test_imports.py                # core/ et ui/ n'importent pas hal/real ni hal/sim
     └── test_resilience.py             # panne d'un capteur → le reste continue
 ```
 
@@ -200,41 +299,40 @@ Project/
 | Bibliothèque | Usage | Justification |
 |---|---|---|
 | **Python 3.11** (fourni par Raspberry Pi OS Bookworm) | — | pas de compilation, `dataclasses`, typage |
-| **PyQt5** (`apt install python3-pyqt5`) | interface graphique | paquet système testé et stable sur Raspberry Pi OS, aucun problème d'architecture ARM, plein écran natif, tactile natif, styles QSS très proches du CSS. Fonctionne à l'identique sur PC. |
-| **sqlite3** (bibliothèque standard) | historique | zéro dépendance, fichier unique, requêtes simples |
+| **PyQt5** (`apt install python3-pyqt5`) | interface graphique | **accepté (rév. 2)**. Paquet système testé et stable sur Raspberry Pi OS, aucun problème d'architecture ARM, plein écran et tactile natifs, styles QSS proches du CSS. Fonctionne à l'identique sur PC. |
+| **pyserial** | liaison SmartShunt | **confirmée (rév. 2)** : la liaison VE.Direct filaire passe par une interface VE.Direct/USB, qui se présente comme un port série. Délai d'expiration natif sur la lecture. |
+| **sqlite3** (bibliothèque standard) | historique | zéro dépendance, fichier unique |
 | **json** (bibliothèque standard) | configuration | lisible, éditable à la main en cas de dépannage |
 | **logging** (bibliothèque standard) | journalisation | sortie vers journald, aucune écriture SD dédiée |
-| **pytest** | tests | seulement en développement |
+| **pytest** | tests | développement uniquement |
+
+Le décodage des trames VE.Direct est écrit dans le projet
+(`hal/real/vedirect_parser.py`), séparé de la liaison série : il se teste sans
+matériel, à partir de trames enregistrées. Aucune bibliothèque tierce Victron
+n'est nécessaire.
 
 ### 3.2 Ajoutées seulement quand le matériel sera choisi
 
 | Bibliothèque | Condition |
 |---|---|
-| `pyserial` | si la liaison SmartShunt retenue est **VE.Direct filaire** |
-| bibliothèque BLE (`bleak` ou équivalent) | si la liaison retenue est **Bluetooth** |
-| bibliothèque du convertisseur analogique-numérique | dépend du modèle choisi |
-| `gpiozero` / `lgpio` | seulement si les actionneurs de vannes sont pilotés par GPIO |
+| bibliothèque du convertisseur analogique-numérique | dépend du modèle choisi — **MATERIEL À INTEGRER PLUS TARD** |
+| `gpiozero` / `lgpio` | seulement si les actionneurs de clapets sont pilotés par GPIO — **MATERIEL À INTEGRER PLUS TARD** |
 
-Ces dépendances seront **optionnelles** : leur absence ne doit pas empêcher
-l'application de démarrer (import différé, à l'intérieur du module `hal/real/`
-concerné uniquement).
+Ces dépendances seront **optionnelles** : import différé, à l'intérieur du
+module `hal/real/` concerné. Leur absence ne doit pas empêcher l'application de
+démarrer.
+
+**Retirée en rév. 2 :** toute bibliothèque Bluetooth. Le Bluetooth n'est pas
+retenu pour le SmartShunt.
 
 ### 3.3 Écartées volontairement
 
 * **Aucun serveur web, aucun navigateur** (Flask/Chromium) : consommation
-  mémoire et complexité inutiles, démarrage plus lent, dépendance à un
-  navigateur en mode kiosque.
+  mémoire et complexité inutiles, démarrage plus lent.
 * **Aucune base de données autre que SQLite.**
 * **Aucun broker de messages** (MQTT) : tout est dans un seul processus.
-* **PySide6** est une alternative acceptable (licence LGPL plutôt que GPL) mais
-  l'installation sur ARM est moins prévisible ; à retenir seulement si la
-  licence GPL de PyQt5 pose problème. **Point à valider.**
-
-### 3.4 Alternative à l'interface graphique
-
-Alternative si PyQt5 pose problème sur ton écran : **Kivy** (accélération GPU,
-tactile excellent) — plus lourd à styler, dépendances plus délicates.
-Recommandation ferme : **PyQt5**.
+* **PySide6** : alternative en réserve si la licence GPL de PyQt5 devenait
+  gênante. L'architecture serait identique.
 
 ---
 
@@ -245,13 +343,18 @@ Signatures uniquement — aucune implémentation à ce stade.
 ### 4.1 Énumérations et modèles (`constants.py`, `models.py`)
 
 ```python
-class Status(Enum):        OK, STALE, FAULT, ABSENT
-class ValveState(Enum):    OUVERT, FERME, OUVERTURE, FERMETURE, ERREUR, INCONNU
-class HeatingMode(Enum):   AUTO, MANUEL
-class ZoneId(Enum):        LOCAL_BATTERIE, LOCAL_EAU, COFFRE, CABINE, CELLULE
-class CircuitId(Enum):     LOCAL_EAU, LOCAL_BATTERIE, CABINE
-class TankId(Enum):        EAU_PROPRE, EAUX_GRISES, GASOIL
-class AlertLevel(Enum):    INFO, WARN, CRITIQUE
+class Status(Enum):          OK, STALE, FAULT, ABSENT
+class HeatingMode(Enum):     AUTO, MANUEL
+class ZoneId(Enum):          LOCAL_BATTERIE, LOCAL_EAU, COFFRE, CABINE, CELLULE
+class CircuitId(Enum):       LOCAL_EAU, LOCAL_BATTERIE, CABINE
+class TankId(Enum):          EAU_PROPRE, EAUX_GRISES, GASOIL
+class AlertLevel(Enum):      INFO, WARN, CRITIQUE
+class SensorLossFallback(Enum):  OPEN, CLOSE, HOLD
+
+# --- clapets : trois notions distinctes, jamais confondues (rév. 2) ---
+class ValveCommand(Enum):    OPEN, CLOSE, STOP, NONE      # ce que le logiciel a demandé
+class ConfirmedState(Enum):  OUVERT, FERME, INCONNU       # ce que le matériel confirme réellement
+class ValveState(Enum):      OUVERT, FERME, OUVERTURE, FERMETURE, ERREUR, INCONNU  # état affiché
 ```
 
 ```python
@@ -267,11 +370,12 @@ class TemperatureReading:
 class TankReading:
     tank: TankId
     label: str
-    litres: float | None       # None pour les eaux grises si non calibré en litres
-    percent: float | None
+    litres: float | None       # None pour les eaux grises (calibrées en %)
+    percent: float | None      # None tant que la capacité n'est pas connue
     raw: float | None
     status: Status
     out_of_range: bool
+    calibrated: bool
     updated_at: float
 
 @dataclass(frozen=True)
@@ -288,16 +392,29 @@ class BatteryReading:
 @dataclass(frozen=True)
 class CircuitStatus:
     circuit: CircuitId
-    label: str                 # "Local eau" — jamais "Circuit 1"
+    label: str                     # "Local eau" — jamais "Circuit 1"
     mode: HeatingMode
-    state: ValveState
     zone: ZoneId
     temperature_c: float | None
-    open_below_c: float
-    close_above_c: float
+
+    # --- état des clapets, rév. 2 ---
+    commanded: ValveCommand        # toujours connu : c'est notre propre ordre
+    confirmed: ConfirmedState      # INCONNU si le matériel ne renvoie pas de position
+    feedback_available: bool       # le pilote fournit-il un retour de position ?
+    display_state: ValveState      # état à afficher, dérivé des trois champs ci-dessus
+    state_is_certain: bool         # False → l'UI doit écrire « commandé », jamais un état sec
+    commanded_since: float
+    transition_deadline: float | None
+
+    # --- seuils et repli ---
+    open_below_c: float | None     # None = seuil non défini → mode AUTO impossible
+    close_above_c: float | None
+    thresholds_defined: bool
+    on_sensor_loss: SensorLossFallback
+    fallback_active: bool          # repli en cours faute de température fiable
+
     fault: bool
     fault_reason: str | None
-    since: float
 
 @dataclass(frozen=True)
 class Alert:
@@ -309,7 +426,6 @@ class Alert:
 @dataclass(frozen=True)
 class SystemSnapshot:
     timestamp: float
-    wall_time: float
     temperatures: dict[ZoneId, TemperatureReading]
     tanks: dict[TankId, TankReading]
     battery: BatteryReading
@@ -320,14 +436,26 @@ class SystemSnapshot:
 
 ### 4.2 Interfaces matérielles (`hal/interfaces.py`)
 
+**Contrat commun à tous les pilotes :** toute méthode ci-dessous rend la main
+avant le `timeout_s` reçu à la construction, ou lève `HardwareTimeout`. Aucune
+méthode ne boucle en attendant un matériel absent.
+
 ```python
+class HardwareError(Exception): ...
+class HardwareTimeout(HardwareError): ...
+class SensorError(HardwareError): ...
+class LinkError(HardwareError): ...
+class ValveError(HardwareError): ...
+
+
 class TemperatureSensor(ABC):
     @abstractmethod
-    def read_celsius(self) -> float: ...        # lève SensorError si indisponible
+    def read_celsius(self) -> float: ...        # lève SensorError / HardwareTimeout
     @abstractmethod
     def sensor_id(self) -> str: ...
     @abstractmethod
     def is_present(self) -> bool: ...
+
 
 class ADCInterface(ABC):
     """Convertisseur analogique-numérique. MATERIEL À INTEGRER PLUS TARD."""
@@ -336,12 +464,14 @@ class ADCInterface(ABC):
     @abstractmethod
     def channels(self) -> list[str]: ...
 
+
 class LevelSensor(ABC):
     """Capteur de niveau. Rend une valeur BRUTE, jamais des litres."""
     @abstractmethod
     def read_raw(self) -> float: ...
     @abstractmethod
     def is_present(self) -> bool: ...
+
 
 class SmartShuntInterface(ABC):
     @abstractmethod
@@ -353,34 +483,86 @@ class SmartShuntInterface(ABC):
     @abstractmethod
     def is_connected(self) -> bool: ...
 
+
 class ValveDriver(ABC):
+    """
+    Rév. 2 — le pilote distingue explicitement ce qui a été COMMANDÉ
+    de ce qui est CONFIRMÉ par le matériel.
+    """
     @abstractmethod
     def open(self) -> None: ...
     @abstractmethod
     def close(self) -> None: ...
     @abstractmethod
     def stop(self) -> None: ...
+
+    @abstractmethod
+    def get_commanded_state(self) -> ValveCommand: ...
+        # dernier ordre effectivement transmis au matériel — toujours connu
+
+    @abstractmethod
+    def has_position_feedback(self) -> bool: ...
+        # False tant que le matériel choisi ne fournit pas de retour de position
+
+    @abstractmethod
+    def get_confirmed_state(self) -> ConfirmedState: ...
+        # OUVERT/FERME UNIQUEMENT si une position réelle est lue.
+        # Un pilote sans retour de position renvoie TOUJOURS INCONNU.
+        # Il est interdit de renvoyer ici une valeur déduite d'un ordre.
+
     @abstractmethod
     def get_state(self) -> ValveState: ...
+        # vue synthétique destinée à l'affichage : confirmée si elle existe,
+        # sinon dérivée de la commande — et signalée comme non certaine
+        # via CircuitStatus.state_is_certain
+
     @abstractmethod
     def has_fault(self) -> bool: ...
 ```
 
-`SensorError`, `LinkError`, `ValveError` : exceptions dédiées définies dans
-`hal/interfaces.py`. Aucune couche supérieure ne rattrape `Exception` nue.
+### 4.3 Acquisition et supervision (`core/workers.py`, `core/state.py`)
 
-### 4.3 Calibration (`core/calibration.py`)
+```python
+@dataclass(frozen=True)
+class WorkerHealth:
+    name: str
+    last_success: float | None
+    consecutive_failures: int
+    stuck: bool
+    restarts: int
+
+class LatestValue:
+    def set(self, value) -> None: ...
+    def get(self) -> tuple[Any | None, float]: ...      # (valeur, âge) — immédiat
+    def mark_fault(self, reason: str) -> None: ...
+
+class HardwareWorker(threading.Thread):
+    def __init__(self, name, read_fn, period_s, timeout_s, watchdog_factor, slot): ...
+    def run(self) -> None: ...
+    def health(self) -> WorkerHealth: ...
+    def request_stop(self) -> None: ...
+
+class WorkerSupervisor:
+    def register(self, worker: HardwareWorker) -> None: ...
+    def check(self, now: float) -> list[WorkerHealth]: ...
+    def restart_if_stuck(self, worker: HardwareWorker) -> None: ...
+    def stop_all(self, timeout_s: float) -> None: ...
+```
+
+### 4.4 Calibration (`core/calibration.py`)
 
 ```python
 @dataclass(frozen=True)
 class CalibrationPoint:
     raw: float
-    value: float               # litres OU pourcentage selon l'unité du réservoir
+    value: float               # litres OU pourcentage, selon l'unité du réservoir
 
 class CalibrationError(ValueError): ...
 
 class CalibrationTable:
-    def __init__(self, points: list[CalibrationPoint], unit: str, capacity: float | None): ...
+    def __init__(self, points, unit: str, capacity_l: float | None): ...
+        # unit = "litres"  → convert() rend des litres
+        # unit = "percent" → convert() rend directement un pourcentage
 
     @classmethod
     def from_config(cls, data: dict) -> "CalibrationTable": ...
@@ -391,83 +573,80 @@ class CalibrationTable:
         # - valeurs brutes strictement monotones (croissantes OU décroissantes)
         # - valeurs converties monotones dans le même sens
         # - aucun doublon de valeur brute
-        # - volumes compris entre 0 et la capacité déclarée
+        # - unit="percent" : toutes les valeurs dans [0, 100]
+        # - unit="litres" + capacité déclarée : toutes les valeurs dans [0, capacité]
         # → lève CalibrationError avec un message affichable à l'écran
 
-    def convert(self, raw: float) -> tuple[float, bool]: ...
-        # interpolation linéaire par segments ; retourne (valeur, hors_plage)
-        # hors plage = valeur bornée au point extrême + drapeau à True
+    def effective_capacity(self) -> float | None: ...
+        # capacité déclarée si elle existe ;
+        # sinon, pour unit="litres", la plus grande valeur de la table
+        # (le dernier point de calibration correspond au réservoir plein) ;
+        # None si la table est vide → pourcentage non calculable
 
-    def percent(self, raw: float) -> tuple[float, bool]: ...
+    def convert(self, raw: float) -> tuple[float, bool]: ...   # (valeur, hors_plage)
+    def percent(self, raw: float) -> tuple[float | None, bool]: ...
     def is_calibrated(self) -> bool: ...
 ```
 
 Les points sont **triés à la construction**. Aucune extrapolation : au-delà du
-dernier point, la valeur est bornée et `out_of_range` passe à `True`
-(l'UI affiche alors la valeur avec un discret repère « hors plage »).
+dernier point, la valeur est bornée et `out_of_range` passe à `True`.
 
-### 4.4 Services métier (`core/`)
+### 4.5 Services métier (`core/`)
 
 ```python
 class TemperatureService:
-    def __init__(self, sensors: dict[ZoneId, TemperatureSensor], config: ConfigStore): ...
-    def poll(self) -> dict[ZoneId, TemperatureReading]: ...     # n'échoue jamais globalement
-    def rebind(self) -> None: ...                               # après changement d'association
-    def scan_available_sensor_ids(self) -> list[str]: ...       # pour la page Paramètres
+    def build_readings(self, now: float) -> dict[ZoneId, TemperatureReading]: ...
+        # lit les LatestValue remplis par temp_worker — aucune I/O
+    def rebind(self) -> None: ...
+    def scan_available_sensor_ids(self) -> list[str]: ...
 
 class TankService:
-    def __init__(self, sensors: dict[TankId, LevelSensor], config: ConfigStore): ...
-    def poll(self) -> dict[TankId, TankReading]: ...
-    def read_raw(self, tank: TankId) -> float | None: ...       # utilisé pendant la calibration
+    def build_readings(self, now: float) -> dict[TankId, TankReading]: ...
+    def read_raw(self, tank: TankId) -> float | None: ...       # pendant la calibration
     def set_calibration(self, tank: TankId, table: CalibrationTable) -> None: ...
 
 class BatteryService:
-    def __init__(self, link: SmartShuntInterface, config: ConfigStore): ...
-    def poll(self) -> BatteryReading: ...
-        # reconnexion avec temporisation croissante (1 s → 30 s max), sans boucle bloquante
+    def build_reading(self, now: float) -> BatteryReading: ...
+        # battery_worker gère connexion et reconnexion à intervalle croissant plafonné
 
 class HeatingCircuit:
-    def __init__(self, circuit_id, label, driver: ValveDriver, config): ...
     def tick(self, temperature: TemperatureReading, now: float) -> CircuitStatus: ...
-    def request_manual(self, action: str) -> None: ...          # "open" | "close" | "stop"
-    def set_mode(self, mode: HeatingMode) -> None: ...
+        # décide seulement ; n'effectue AUCUNE I/O — empile un ordre pour valve_worker
+    def request_manual(self, action: str) -> None: ...
+    def set_mode(self, mode: HeatingMode) -> None: ...          # refuse AUTO si seuils non définis
     def set_thresholds(self, open_below_c: float, close_above_c: float) -> None: ...
 
 class HeatingController:
-    def __init__(self, circuits: dict[CircuitId, HeatingCircuit]): ...
     def tick(self, temperatures, now) -> dict[CircuitId, CircuitStatus]: ...
 
 class AlertEngine:
-    def __init__(self, config: ConfigStore): ...
-    def evaluate(self, snapshot_parts) -> tuple[Alert, ...]: ...
+    def evaluate(self, snapshot_parts, worker_health) -> tuple[Alert, ...]: ...
 
 class HistoryRecorder:
-    def __init__(self, config: ConfigStore): ...
-    def maybe_record(self, snapshot: SystemSnapshot) -> None: ...  # respecte la période
+    def maybe_record(self, snapshot: SystemSnapshot) -> None: ...
     def purge(self) -> None: ...
     def query(self, since: float) -> list[dict]: ...
     def close(self) -> None: ...
-    # si history.enabled == False : aucun fichier ouvert, aucune écriture, aucune erreur
+    # history.enabled == False : aucun thread créé, aucun fichier ouvert,
+    # aucune base créée, aucune écriture, aucune erreur
 ```
 
-### 4.5 Configuration (`config/store.py`)
+### 4.6 Configuration (`config/store.py`)
 
 ```python
 class ConfigStore(QObject):
-    changed = pyqtSignal(str)     # chemin de la clé modifiée, ex. "heating.circuits.cabine"
+    changed = pyqtSignal(str)     # chemin de la clé modifiée
 
-    def __init__(self, path: Path): ...
     def load(self) -> None: ...            # défauts → fichier → validation → migration
     def get(self, path: str, default=None): ...
-    def set(self, path: str, value) -> None: ...     # applique en mémoire + planifie l'écriture
-    def save_now(self) -> None: ...        # écriture atomique : .tmp → fsync → os.replace
+    def set(self, path: str, value) -> None: ...
+    def save_now(self) -> None: ...        # .tmp → fsync → os.replace
     def reset_section(self, path: str) -> None: ...
 ```
 
-Écriture **différée de 2 secondes** et regroupée : déplacer un curseur ne
-déclenche qu'une seule écriture disque. Sauvegarde d'un exemplaire `config.bak`
-avant remplacement ; en cas de fichier corrompu au démarrage, repli sur `.bak`
-puis sur les valeurs par défaut, avec alerte technique.
+Écriture **différée de 2 secondes** et regroupée. Sauvegarde `config.bak` avant
+remplacement ; en cas de fichier corrompu au démarrage, repli sur `.bak` puis
+sur les valeurs par défaut, avec alerte technique.
 
 ---
 
@@ -483,12 +662,17 @@ Emplacement : `/var/lib/vanmonitor/config.json` (persistant, hors dépôt).
   "general": {
     "simulation": false,
     "fullscreen": true,
-    "ui_refresh_hz": 2,
-    "brightness_control": false
+    "ui_refresh_hz": 2
+  },
+
+  "workers": {
+    "watchdog_factor": 3,
+    "restart_backoff_s": [5, 15, 60, 300]
   },
 
   "temperatures": {
     "poll_period_s": 10,
+    "read_timeout_s": 3.0,
     "stale_after_s": 60,
     "valid_range_c": [-40.0, 85.0],
     "zones": {
@@ -502,43 +686,46 @@ Emplacement : `/var/lib/vanmonitor/config.json` (persistant, hors dépôt).
 
   "tanks": {
     "poll_period_s": 2,
+    "read_timeout_s": 1.0,
     "filter": { "median_window": 5, "ema_alpha": 0.2 },
+
     "eau_propre": {
       "label": "Eau propre",
       "display": ["litres", "percent"],
       "unit": "litres",
-      "capacity_l": null,                        // À CONFIRMER (volume total du réservoir)
-      "channel": "CH0",                          // MATERIEL À INTEGRER PLUS TARD
+      "capacity_l": null,                 // capacité inconnue : déduite du dernier point de calibration
+      "channel": "CH0",                   // MATERIEL À INTEGRER PLUS TARD
       "calibration": { "points": [], "updated_at": null }
     },
     "eaux_grises": {
       "label": "Eaux grises",
       "display": ["percent"],
-      "unit": "percent",
+      "unit": "percent",                  // calibration directement en %, affichage % uniquement
       "capacity_l": null,
-      "channel": "CH1",                          // MATERIEL À INTEGRER PLUS TARD
+      "channel": "CH1",                   // MATERIEL À INTEGRER PLUS TARD
       "calibration": { "points": [], "updated_at": null }
     },
     "gasoil": {
       "label": "Gasoil",
       "display": ["litres", "percent"],
       "unit": "litres",
-      "capacity_l": 105.0,
-      "channel": "CH2",                          // MATERIEL À INTEGRER PLUS TARD
+      "capacity_l": 105.0,                // capacité connue et déclarée
+      "channel": "CH2",                   // MATERIEL À INTEGRER PLUS TARD
       "calibration": { "points": [], "updated_at": null }
     }
   },
 
   "battery": {
-    "poll_period_s": 1,
     "stale_after_s": 15,
+    "read_timeout_s": 2.0,
     "reconnect_backoff_s": [1, 2, 5, 10, 30],
     "show_time_to_go": true,
     "time_to_go_max_valid_min": 6000,
     "link": {
-      "type": "mock",                            // MATERIEL À INTEGRER PLUS TARD
-      "port": null,
-      "address": null
+      "type": "vedirect_serial",
+      "port": "/dev/serial/by-id/…",      // nom stable via règle udev — à figer à la mise en service
+      "baudrate": 19200                   // paramètres série conformes à la documentation VE.Direct,
+                                          // à confirmer au premier branchement
     }
   },
 
@@ -547,21 +734,26 @@ Emplacement : `/var/lib/vanmonitor/config.json` (persistant, hors dépôt).
     "min_state_dwell_s": 120,
     "transition_timeout_s": 60,
     "min_threshold_delta_c": 1.0,
-    "on_sensor_loss": "hold",                    // "hold" | "close" | "open"  — À VALIDER
     "circuits": {
       "local_eau": {
         "label": "Local eau", "zone": "local_eau", "mode": "auto",
-        "open_below_c": 5.0, "close_above_c": 8.0,
+        "open_below_c": 5.0,               // EXEMPLE, modifiable à l'écran
+        "close_above_c": 8.0,              // EXEMPLE, modifiable à l'écran
+        "on_sensor_loss": "open",
         "driver": { "type": "mock", "params": {} }   // MATERIEL À INTEGRER PLUS TARD
       },
       "local_batterie": {
-        "label": "Local batterie", "zone": "local_batterie", "mode": "auto",
-        "open_below_c": 5.0, "close_above_c": 8.0,
+        "label": "Local batterie", "zone": "local_batterie", "mode": "manuel",
+        "open_below_c": null,              // À DÉFINIR — mode AUTO indisponible tant que null
+        "close_above_c": null,
+        "on_sensor_loss": "open",
         "driver": { "type": "mock", "params": {} }
       },
       "cabine": {
-        "label": "Cabine", "zone": "cabine", "mode": "auto",
-        "open_below_c": 12.0, "close_above_c": 16.0,
+        "label": "Cabine", "zone": "cabine", "mode": "manuel",
+        "open_below_c": null,              // À DÉFINIR
+        "close_above_c": null,
+        "on_sensor_loss": "hold",
         "driver": { "type": "mock", "params": {} }
       }
     }
@@ -578,79 +770,99 @@ Emplacement : `/var/lib/vanmonitor/config.json` (persistant, hors dépôt).
   },
 
   "history": {
-    "enabled": true,
-    "sample_period_s": 60,
+    "enabled": false,                     // DÉSACTIVÉ PAR DÉFAUT (rév. 2)
+    "sample_period_s": 300,               // 5 minutes si activé
     "retention_hours": 24,
     "db_path": "/var/lib/vanmonitor/history.db",
     "batch_size": 10
   },
 
-  "logging": {
-    "level": "INFO",
-    "dedup_window_s": 300
-  }
+  "logging": { "level": "INFO", "dedup_window_s": 300 }
 }
 ```
 
 Notes :
 
-* Les seuils par défaut de chauffage ci-dessus sont des **valeurs de départ
-  modifiables à l'écran**, pas des choix techniques figés.
-* `min_state_dwell_s`, `transition_timeout_s`, `filter`, `reconnect_backoff_s`,
-  `logging` **ne sont pas exposés dans la page Paramètres** (réglages techniques
-  inutiles au conducteur), conformément à ta demande.
+* **Les seuils de chauffage ci-dessus sont des valeurs d'exemple, pas des choix
+  définitifs.** Seul `local_eau` porte un exemple chiffré (5 / 8 °C).
+  `local_batterie` et `cabine` sont à `null` : à définir. Tous restent
+  modifiables à l'écran à tout moment.
+* Un circuit dont les seuils valent `null` **ne peut pas passer en AUTO** : le
+  mode AUTO est refusé et l'écran affiche `SEUILS À DÉFINIR`. Aucune alerte
+  n'est levée pour autant — ce n'est pas une panne.
+* `workers`, `min_state_dwell_s`, `transition_timeout_s`, `filter`,
+  `reconnect_backoff_s`, `read_timeout_s`, `logging` et `on_sensor_loss`
+  **ne sont pas modifiables dans la page Paramètres** (réglages techniques ou de
+  sécurité, inutiles au conducteur). Le repli par circuit y est affiché **en
+  lecture seule**, pour information.
 
 ---
 
 ## 6. Communication entre modules
 
-### 6.1 Boucle nominale (une seconde)
+### 6.1 Threads d'acquisition — indépendants les uns des autres
 
 ```
-  ┌── AcquisitionWorker.tick() ────────────────────────────────────────┐
-  │ 1. CommandBus.drain()      → applique les commandes de l'UI        │
-  │ 2. TemperatureService.poll()  (si période échue)                   │
-  │ 3. TankService.poll()         (si période échue)                   │
-  │ 4. BatteryService.poll()      (si période échue)                   │
-  │ 5. HeatingController.tick(températures)                            │
-  │ 6. AlertEngine.evaluate(...)                                       │
-  │ 7. StateStore.publish(SystemSnapshot)                              │
-  │ 8. HistoryRecorder.maybe_record(snapshot)                          │
+   temp_worker      level_worker      battery_worker
+   (10 s, 3 s max)  (2 s, 1 s max)    (série, 2 s max)
+        │                 │                  │
+        ▼                 ▼                  ▼
+   LatestValue       LatestValue        LatestValue      ← écriture sous verrou court
+        └─────────────────┴──────────────────┘
+                          │  lecture immédiate, jamais bloquante
+                          ▼
+                    control_worker (1 s)
+```
+
+### 6.2 Boucle de contrôle (une seconde) — aucune I/O matérielle
+
+```
+  ┌── ControlWorker.tick() ────────────────────────────────────────────┐
+  │ 1. CommandBus.drain()            → applique les commandes de l'UI  │
+  │ 2. WorkerSupervisor.check()      → santé des threads d'acquisition │
+  │ 3. TemperatureService.build_readings()   (lecture mémoire)         │
+  │ 4. TankService.build_readings()          (lecture mémoire)         │
+  │ 5. BatteryService.build_reading()        (lecture mémoire)         │
+  │ 6. HeatingController.tick()      → décisions → ordres empilés      │
+  │ 7. AlertEngine.evaluate()                                          │
+  │ 8. StateStore.publish(SystemSnapshot)                              │
+  │ 9. HistoryRecorder.maybe_record()   (sans effet si désactivé)      │
   └────────────────────────────────────────────────────────────────────┘
-                              │ signal Qt snapshotReady
+                              │ signal Qt snapshotReady (QueuedConnection)
                               ▼
-                    HomePage.on_snapshot(snapshot)   → redessine les tuiles
+                    HomePage.on_snapshot(snapshot)
 ```
 
-Chaque étape est protégée individuellement : une exception à l'étape 3
-n'empêche ni l'étape 5 ni la publication du snapshot. Le service fautif
-renvoie un statut `FAULT` et l'application continue.
+Chaque étape est protégée individuellement : une exception à l'étape 4
+n'empêche ni l'étape 6 ni la publication du snapshot.
 
-### 6.2 Chemin d'une commande utilisateur
+### 6.3 Chemin d'une commande utilisateur
 
 ```
-Appui « OUVRIR » sur Cabine (UI)
+Appui « OUVRIR » sur Cabine (UI, thread Qt)
     → CommandBus.submit(ManualValveCommand(CircuitId.CABINE, "open"))
     → (tick suivant) HeatingCircuit.request_manual("open")
-    → ValveDriver.open()
-    → nouvel état lu dans get_state() → CircuitStatus → snapshot → UI
+    → ordre empilé pour valve_worker            ← le thread de contrôle n'attend pas
+    → valve_worker : ValveDriver.open()          ← I/O sous délai d'expiration
+    → commanded = OPEN, confirmed = lu ou INCONNU
+    → CircuitStatus → snapshot → UI
 ```
 
-L'UI **n'affiche jamais un état qu'elle a supposé** : elle affiche uniquement
-l'état renvoyé par le pilote au tour suivant. Un ordre sans effet reste donc
-visible (état `OUVERTURE` puis `ERREUR` après expiration du délai).
+L'UI **n'affiche jamais un état qu'elle a supposé**. Elle affiche l'état
+construit par le thread de contrôle, avec la mention « commandé » tant qu'aucun
+retour de position ne le confirme (§7.4).
 
-### 6.3 Chemin d'un changement de réglage
+### 6.4 Chemin d'un changement de réglage
 
 ```
 Modification d'un seuil (UI)
     → ConfigStore.set("heating.circuits.cabine.open_below_c", 11.0)
-    → validation immédiate (fermeture > ouverture + delta minimal)
+    → validation immédiate (fermeture ≥ ouverture + 1 °C)
     → signal changed → HeatingCircuit relit ses seuils au tick suivant
     → écriture disque différée et groupée (2 s)
 ```
 
-### 6.4 Sens des dépendances (import)
+### 6.5 Sens des dépendances (import)
 
 ```
 ui       → core, config, models, constants
@@ -660,20 +872,39 @@ hal.sim  → hal.interfaces
 app      → tout (seul endroit autorisé)
 ```
 
-Un test automatique de l'arborescence des imports vérifiera qu'aucun fichier de
-`core/` ou `ui/` n'importe `hal.real` ou `hal.sim`.
+Vérifié automatiquement par `tests/test_imports.py`.
 
 ---
 
 ## 7. Maquette détaillée — écran Accueil
 
-Résolution de référence **800 × 480**, thème sombre, aucune barre de défilement,
-tout est visible sans interaction.
+### 7.1 Contrainte d'affichage (rév. 2)
+
+Le modèle d'écran n'est pas choisi. La mise en page est donc **adaptative**,
+pour une dalle tactile de 4,3" à 5" :
+
+* aucune position ni taille en pixels absolus : uniquement des dispositions Qt
+  proportionnelles ;
+* échelle typographique unique calculée à l'exécution depuis la hauteur réelle
+  de la dalle (`ui/theme.py`) ;
+* cibles tactiles définies en millimètres (≥ 9 mm), converties en pixels selon
+  la résolution détectée ;
+* deux profils de disposition choisis automatiquement (`ui/layout_profile.py`) :
+  **standard** (largeur ≥ 720 px) tel que représenté ci-dessous, et **compact**
+  (largeur < 720 px) où les quatre tuiles passent sur deux rangées de deux et le
+  bloc chauffage se réduit à trois lignes d'une ligne chacune ;
+* enveloppe de validation : la disposition doit rester lisible de 480 × 272 à
+  1024 × 600.
+
+La maquette ci-dessous est représentée à 800 × 480, résolution la plus courante
+dans cette gamme, **à titre de représentation et non de spécification**.
+
+### 7.2 Écran
 
 ```
-┌──────────────────────────────────────────────────────────────────────────┐ 0
-│  FOURGON                         14:32                      ● SIM   [⚙]  │ 48 px
-├───────────────────┬───────────────────┬──────────────┬───────────────────┤ 48
+┌──────────────────────────────────────────────────────────────────────────┐
+│  FOURGON                         14:32                      ● SIM   [⚙]  │
+├───────────────────┬───────────────────┬──────────────┬───────────────────┤
 │ BATTERIE          │ EAU PROPRE        │ EAUX GRISES  │ GASOIL            │
 │                   │                   │              │                   │
 │    87 %           │    68 L           │    42 %      │    76 L           │
@@ -682,132 +913,135 @@ tout est visible sans interaction.
 │  13,2 V   -4,2 A  │                   │              │                   │
 │  -55 W   -12 Ah   │                   │              │                   │
 │  Autonomie 18 h   │                   │              │                   │
-├───────────────────┴──────────┬────────┴──────────────┴───────────────────┤ 268
+├───────────────────┴──────────┬────────┴──────────────┴───────────────────┤
 │ TEMPÉRATURES                 │ CHAUFFAGE                                 │
 │                              │                                           │
-│ Local batterie      12,4 °C  │ Local eau        AUTO    ● OUVERT         │
-│ Local eau            6,1 °C  │ Local batterie   AUTO    ○ FERMÉ          │
-│ Coffre               9,8 °C  │ Cabine           MANU    ◐ OUVERTURE      │
+│ Local batterie      12,4 °C  │ Local eau       AUTO   ◉ OUVERT commandé  │
+│ Local eau            6,1 °C  │ Local batterie  MANU   ○ FERMÉ commandé   │
+│ Coffre               9,8 °C  │ Cabine          MANU   ◐ OUVERTURE        │
 │ Cabine              18,2 °C  │                                           │
 │ Cellule                  --  │                                           │
-├──────────────────────────────┴───────────────────────────────────────────┤ 436
-│  ⚠  Eau propre 18 %   ·   SmartShunt non joignable                  (2)  │ 44 px
-└──────────────────────────────────────────────────────────────────────────┘ 480
+├──────────────────────────────┴───────────────────────────────────────────┤
+│  ⚠  Eau propre 18 %   ·   SmartShunt non joignable                  (2)  │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Détail des éléments
+### 7.3 Détail des blocs
 
-**Bandeau supérieur (48 px)**
-* Titre court à gauche, heure au centre.
-* Pastille d'état à droite : `● SIM` en orange en mode simulation,
-  rien en fonctionnement normal (pas de bruit visuel inutile).
-* Bouton engrenage : cible tactile **64 × 48 px**, seule entrée vers Paramètres.
+**Bandeau supérieur**
+Titre court, heure, pastille `SIM` uniquement en simulation, bouton engrenage
+(seule entrée vers Paramètres).
 
-**Quatre tuiles principales (220 px de haut)**
-* Titre en petites capitales gris clair (14 px).
-* Valeur principale en **48 px gras**, lisible à 1 m.
-* Valeurs secondaires en 18 px.
-* Jauge horizontale de 12 px : verte, orange sous le seuil d'alerte, rouge en
-  alerte. Les eaux grises suivent la logique inverse (rouge au-dessus du seuil).
-* Batterie : le courant et la puissance sont **signés** (négatif = décharge) et
-  colorés (bleu en charge, gris en décharge).
-* Autonomie affichée **seulement** si le SmartShunt la fournit et qu'elle est
-  jugée plausible ; sinon la ligne disparaît (pas de « N/A »).
-* Capteur en défaut : la valeur devient `--` en gris, la jauge devient une
-  bande hachurée, et le sous-titre affiche `Erreur capteur` en 14 px.
+**Quatre tuiles principales**
+* Valeur principale très grande, valeurs secondaires en petit.
+* Jauge horizontale : verte, orange sous le seuil d'alerte, rouge en alerte.
+  Les eaux grises suivent la logique inverse.
+* Batterie : courant et puissance **signés** (négatif = décharge). Autonomie
+  affichée seulement si le SmartShunt la fournit et qu'elle est plausible ;
+  sinon la ligne disparaît (pas de « N/A »).
+* **Eau propre** : litres issus de la calibration multipoints ; pourcentage
+  calculé sur la capacité **déduite du dernier point de calibration** tant
+  qu'aucune capacité n'est déclarée. Avant calibration : `--` pour les deux.
+* **Eaux grises** : pourcentage uniquement, issu directement de la calibration.
+  Jamais de litres.
+* **Gasoil** : litres issus de la calibration, pourcentage calculé sur 105 L.
+* Capteur en défaut : valeur `--` en gris, jauge hachurée, sous-titre
+  `Erreur capteur`.
 
-**Bloc Températures (168 px)**
-* Cinq lignes fixes, toujours dans le même ordre, libellés en clair.
-* Valeur alignée à droite, 22 px, une décimale.
-* Sonde absente ou périmée → `--` ; sonde en défaut → `Erreur capteur`.
+**Bloc Températures**
+Cinq lignes fixes, toujours dans le même ordre. `--` si absente ou périmée,
+`Erreur capteur` si en défaut.
 
-**Bloc Chauffage (168 px)**
-* Trois lignes nommées : **Local eau**, **Local batterie**, **Cabine**.
-  Jamais « Circuit 1/2/3 ».
-* Colonne mode : `AUTO` ou `MANU`.
-* Colonne état avec pastille de couleur :
-  `● OUVERT` (orange plein) · `○ FERMÉ` (gris) · `◐ OUVERTURE` / `◑ FERMETURE`
-  (animation lente) · `✕ ERREUR` (rouge) · `? INCONNU` (gris barré).
-* Un appui long sur une ligne ouvre directement la page de réglage du circuit
-  concerné (raccourci, pas un menu supplémentaire).
+**Bloc Chauffage** — voir §7.4.
 
-**Barre d'alertes (44 px)**
-* Aucune alerte → fond neutre, texte gris : **« Aucune alerte »**.
-* Une alerte → fond ambré ; plusieurs → l'alerte la plus grave est affichée,
-  suivie du compteur `(2)`. Un appui déroule la liste complète en surimpression.
-* Aucune animation clignotante, aucun son (à confirmer si tu veux un buzzer :
-  **MATERIEL À INTEGRER PLUS TARD**).
+**Barre d'alertes**
+Aucune alerte → fond neutre, texte gris **« Aucune alerte »**. Sinon, l'alerte
+la plus grave et un compteur ; appui pour dérouler la liste. Aucun clignotement.
 
-**Palette**
-| Rôle | Couleur |
-|---|---|
-| Fond général | `#0E1116` |
-| Fond des tuiles | `#171B22` |
-| Texte principal | `#F2F5F9` |
-| Texte secondaire | `#8B96A5` |
-| Accent / valeur normale | `#3FB950` |
-| Avertissement | `#D29922` |
-| Alerte | `#F04747` |
-| Chauffage actif | `#F0883E` |
+### 7.4 Affichage de l'état des clapets (rév. 2)
+
+L'écran distingue en permanence **ce qui a été commandé** de **ce qui est
+physiquement confirmé**. Le logiciel n'affiche jamais un état physique comme
+certain sans retour de position réel.
+
+| Situation | Affichage | Certitude |
+|---|---|---|
+| Retour de position disponible, position lue | `● OUVERT` / `○ FERMÉ` — pastille pleine, texte franc | état **confirmé** |
+| Pas de retour de position, ordre d'ouverture passé | `◉ OUVERT commandé` — pastille en anneau, suffixe gris | état **commandé** |
+| Pas de retour de position, ordre de fermeture passé | `○ FERMÉ commandé` | état **commandé** |
+| Ordre en cours, dans le délai de transition | `◐ OUVERTURE` / `◑ FERMETURE` | transitoire |
+| Retour de position attendu mais non obtenu à l'échéance | `✕ ERREUR` + alerte technique | défaut |
+| Retour de position contredisant l'ordre | `✕ ERREUR` + alerte technique | défaut |
+| Au démarrage, aucun ordre encore passé et pas de retour | `? INCONNU` | inconnu |
+
+Règles associées :
+
+* `state_is_certain = feedback_available and confirmed != INCONNU`. Le widget
+  `circuit_row` s'appuie uniquement sur ce champ pour décider s'il ajoute le mot
+  « commandé » ; il ne fait aucune supposition de son côté.
+* Le mot « commandé » est écrit en toutes lettres, en gris, à côté de l'état :
+  aucun code de couleur seul, aucune icône seule.
+* Un `MockValveDriver` doit exister **dans les deux variantes** (avec et sans
+  retour de position) pour que le cas « sans retour » soit testé dès l'étape 2.
+* Le repli sur perte de sonde affiche en plus la mention `REPLI` sur la ligne du
+  circuit concerné.
 
 ---
 
 ## 8. Maquette détaillée — écran Paramètres
 
 Deux niveaux seulement : rail de sections à gauche, contenu à droite.
-Aucun sous-menu au-delà.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│ [←] PARAMÈTRES                                                           │ 48 px
+│ [←] PARAMÈTRES                                                           │
 ├──────────────┬───────────────────────────────────────────────────────────┤
 │ CHAUFFAGE  ▸ │  CHAUFFAGE                                                │
 │ ALERTES      │                                                           │
 │ CALIBRATION  │  Local eau                            [ AUTO ] [ MANUEL ] │
-│ SONDES       │    Ouverture   [   5,0 °C  ]                              │
-│ HISTORIQUE   │    Fermeture   [   8,0 °C  ]                              │
-│              │    État : OUVERT             [ OUVRIR ]  [ FERMER ]       │
+│ SONDES       │    Ouverture   [   5,0 °C  ]   Fermeture  [   8,0 °C  ]   │
+│ HISTORIQUE   │    État : OUVERT (commandé)   [ OUVRIR ]  [ FERMER ]      │
+│              │    Repli si sonde perdue : ouverture                      │
 │              │  ───────────────────────────────────────────────────────  │
-│ 160 px       │  Local batterie                       [ AUTO ] [ MANUEL ] │
-│              │    Ouverture   [   5,0 °C  ]                              │
-│              │    Fermeture   [   8,0 °C  ]                              │
-│              │    État : FERMÉ              [ OUVRIR ]  [ FERMER ]       │
-│              │  ───────────────────────────────────────────────────────  │
-│              │  Cabine                               [ AUTO ] [ MANUEL ] │
-│              │    Ouverture   [  12,0 °C  ]     ▲ défilement vertical    │
+│              │  Local batterie                       [ AUTO ] [ MANUEL ] │
+│              │    Ouverture   [    --     ]   Fermeture  [    --     ]   │
+│              │    ⚠ Seuils à définir — mode AUTO indisponible            │
+│              │    État : FERMÉ (commandé)    [ OUVRIR ]  [ FERMER ]      │
+│              │    Repli si sonde perdue : ouverture                      │
 └──────────────┴───────────────────────────────────────────────────────────┘
 ```
 
-Règles communes à toutes les sections :
+Règles communes :
 
-* Toute cible tactile fait au minimum **64 px de haut**.
-* Un appui sur un champ numérique ouvre un **pavé numérique plein écran**
-  (grand, avec `−` / `+` par pas, `Annuler` / `Valider`). Aucun clavier système.
-* Les modifications sont **appliquées immédiatement** et sauvegardées après 2 s.
-  Pas de bouton « Enregistrer » global, pas de risque d'oubli.
-* Une valeur refusée affiche un bandeau rouge explicite sous le champ
-  (ex. « La fermeture doit dépasser l'ouverture d'au moins 1 °C ») et la valeur
-  précédente est conservée.
+* Cibles tactiles ≥ 9 mm ; un appui sur un champ numérique ouvre un **pavé
+  numérique plein écran** (`−` / `+`, `Annuler` / `Valider`). Aucun clavier
+  système.
+* Modifications **appliquées immédiatement**, sauvegardées après 2 s. Pas de
+  bouton « Enregistrer » global.
+* Valeur refusée → bandeau rouge explicite sous le champ, valeur précédente
+  conservée.
 
 ### Section CHAUFFAGE
-Trois blocs nommés `Local eau`, `Local batterie`, `Cabine`.
-Pour chacun : bascule AUTO/MANUEL, seuil d'ouverture, seuil de fermeture, état
-courant en direct, boutons `OUVRIR` / `FERMER` **grisés en mode AUTO**.
-Contrainte appliquée : `fermeture ≥ ouverture + 1 °C`.
+Trois blocs nommés `Local eau`, `Local batterie`, `Cabine`. Pour chacun :
+bascule AUTO/MANUEL, seuil d'ouverture, seuil de fermeture, état courant avec la
+mention « commandé » quand il n'est pas confirmé, boutons `OUVRIR` / `FERMER`
+grisés en mode AUTO, et le repli configuré affiché **en lecture seule**.
+Contraintes : `fermeture ≥ ouverture + 1 °C` ; le bouton `AUTO` est désactivé
+tant que les deux seuils ne sont pas définis, avec le message
+`Seuils à définir — mode AUTO indisponible`.
 
 ### Section ALERTES
 ```
-  Batterie basse         [  20 %  ]   ◀ ▶
+  Batterie basse         [  20 %  ]
   Eau propre basse       [  20 %  ]
   Gasoil bas             [  20 %  ]
   Eaux grises hautes     [  80 %  ]
   Alertes techniques     [ ● activées ]
-  ─────────────────────────────────────
   [ Rétablir les valeurs par défaut ]
 ```
 
 ### Section CALIBRATION
-Choix du réservoir (`Eau propre` · `Eaux grises` · `Gasoil`) puis assistant :
+Choix du réservoir, puis assistant identique pour les trois, à une colonne près :
 
 ```
   CALIBRATION — EAU PROPRE
@@ -823,19 +1057,22 @@ Choix du réservoir (`Eau propre` · `Eaux grises` · `Gasoil`) puis assistant :
 
   [ + AJOUTER LE POINT ACTUEL ]      Litres : [  30  ]
 
-  Capacité totale : [ 100 L ]
+  Capacité : déduite du dernier point (100 L)      [ déclarer une capacité ]
   Aperçu : brut 0,412 → 20,0 L → 20 %
-  ⚠ Les points doivent être croissants (message contextuel si incohérence)
 
   [ EFFACER LA TABLE ]                            [ VALIDER ]
 ```
 
-* La calibration se fait **réservoir en cours de remplissage** : on ajoute un
-  point à chaque palier connu, l'ordre de saisie n'a pas d'importance
-  (tri automatique).
-* Pour les eaux grises, la colonne se nomme `%` au lieu de `LITRES`.
-* Refus explicite d'enregistrer une table non monotone ou à moins de 2 points ;
-  la table précédente reste active tant que la nouvelle n'est pas valide.
+| Réservoir | Colonne saisie | Capacité | Affichage Accueil |
+|---|---|---|---|
+| **Eau propre** | litres | inconnue → déduite du plus haut point de calibration ; déclarable à la main plus tard | litres + % |
+| **Eaux grises** | **pourcentage** | sans objet | % uniquement |
+| **Gasoil** | litres | 105 L, déclarée et non modifiable par erreur | litres + % |
+
+Calibration effectuée réservoir en cours de remplissage : un point par palier
+connu, l'ordre de saisie est indifférent (tri automatique). Refus explicite
+d'une table non monotone ou de moins de deux points ; la table précédente reste
+active tant que la nouvelle est invalide.
 
 ### Section SONDES (association DS18B20)
 ```
@@ -848,52 +1085,70 @@ Choix du réservoir (`Eau propre` · `Eaux grises` · `Gasoil`) puis assistant :
   Cellule          [ — non associée —  ▾ ]     --
 
   [ IDENTIFIER ]  ← affiche en direct la température de la sonde sélectionnée
-                     pour la reconnaître en la réchauffant à la main
 ```
 
-Une même sonde ne peut pas être associée à deux zones (l'autre association est
-libérée automatiquement, avec message).
+Une même sonde ne peut pas être associée à deux zones.
 
 ### Section HISTORIQUE
 ```
-  Historique              [ ● activé  /  ○ désactivé ]
-  Fréquence d'enregistrement   [  60 s  ]   (30 s · 60 s · 5 min · 15 min)
-  Durée de conservation        [  24 h  ]   (6 h · 12 h · 24 h · 48 h)
+  Historique              [ ○ activé  /  ● désactivé ]     ← désactivé par défaut
+  Fréquence d'enregistrement   [  5 min  ]   (1 min · 5 min · 15 min · 30 min)
+  Durée de conservation        [  24 h   ]   (6 h · 12 h · 24 h · 48 h)
 
-  Taille actuelle de la base : 412 ko · 1 380 enregistrements
+  Base absente (historique désactivé)
   [ EFFACER L'HISTORIQUE ]
 ```
 
-Désactiver l'historique ferme la base immédiatement et n'entraîne **aucune**
-autre conséquence fonctionnelle.
+Historique **désactivé par défaut**. Tant qu'il l'est : aucun thread créé,
+aucun fichier ouvert, aucune base créée. L'activer crée la base ; le désactiver
+la referme immédiatement, sans autre conséquence fonctionnelle.
 
 ### Non exposé dans Paramètres (volontairement)
-Périodes de scrutation, filtres, temporisations de vannes, délais de
-reconnexion, niveau de journalisation, chemins de fichiers, mode simulation.
-Ces réglages restent dans `config.json`, accessibles en dépannage.
+Périodes de scrutation, délais d'expiration, chien de garde, filtres,
+temporisations de clapets, délais de reconnexion, port série, niveau de
+journalisation, chemins de fichiers, mode simulation. Le repli par circuit y est
+affiché mais **non modifiable** (choix de sécurité, réglable dans
+`config.json`).
 
 ---
 
 ## 9. Éléments matériels à intégrer plus tard
 
-Tous ces points sont **abstraits** dans le logiciel dès l'étape 2 et
-n'empêcheront aucun développement.
-
 | # | Élément | Ce qui manque | Interface logicielle prévue |
 |---|---|---|---|
 | H-1 | **Capteurs de niveau** (eau propre, eaux grises, gasoil) | technologie et type de signal de sortie non choisis | `LevelSensor.read_raw()` — valeur brute sans unité |
 | H-2 | **Convertisseur analogique-numérique** | modèle, bus et nombre de voies non choisis | `ADCInterface.read_channel(channel)` |
-| H-3 | **Actionneurs des 3 circuits de chauffage** | type d'actionneur, alimentation, présence ou non d'un retour de position | `ValveDriver` (`open/close/stop/get_state/has_fault`) |
-| H-4 | **Liaison avec le Victron SmartShunt** | filaire ou sans fil : non tranché | `SmartShuntInterface` + module `smartshunt_link.py` interchangeable |
-| H-5 | **Câblage 1-Wire des DS18B20** | broche utilisée, longueur de bus, résistance de tirage, alimentation | chemin `/sys/bus/w1/devices` (interface noyau standard), broche déclarée en configuration |
-| H-6 | **Écran tactile** | modèle et interface non confirmés | résolution lue à l'exécution, mise en page adaptative 800×480 → 1024×600 |
-| H-7 | **Horloge temps réel (RTC)** | présence non confirmée | horloge monotone pour toute la logique ; horodatage mural marqué « non fiable » tant que l'heure n'est pas sûre |
-| H-8 | **Alimentation et arrêt propre** | pas de dispositif de coupure contrôlée confirmé | montage disque en lecture seule + écritures atomiques (voir R-01) |
-| H-9 | **Avertisseur sonore** | non demandé, non confirmé | prévu comme option de configuration, désactivé par défaut |
+| H-3 | **Actionneurs des 3 circuits de chauffage** | type d'actionneur, alimentation, **et surtout : présence ou non d'un retour de position** | `ValveDriver` avec `get_commanded_state()`, `get_confirmed_state()`, `has_position_feedback()` |
+| H-5 | **Câblage 1-Wire des DS18B20** | broche utilisée, longueur de bus, résistance de tirage, alimentation | chemin `/sys/bus/w1/devices` (interface noyau standard) |
+| H-6 | **Écran tactile 4,3"–5"** | modèle et résolution non choisis | mise en page adaptative, aucun pixel absolu (§7.1) |
 
-Pour chacun, le module `hal/real/` correspondant existera dès l'étape 2 avec un
-en-tête `# MATERIEL À INTEGRER PLUS TARD` et une implémentation qui lève
-proprement `NotImplementedError` — jamais un plantage de l'application.
+### H-4 — Liaison SmartShunt : **résolue (rév. 2)**
+
+Chaîne retenue :
+
+```
+Victron SmartShunt  →  VE.Direct filaire  →  interface VE.Direct/USB  →  Raspberry Pi (port série)
+```
+
+Le Bluetooth n'est pas retenu. Conséquences :
+
+* `pyserial` devient une dépendance **confirmée** ;
+* implémentation `hal/real/smartshunt_vedirect.py`, décodage des trames isolé
+  dans `hal/real/vedirect_parser.py` (testable sans matériel) ;
+* `battery.link.type = "vedirect_serial"` ;
+* le port est désigné par un **nom stable** (`/dev/serial/by-id/…`) via une règle
+  udev livrée dans `deploy/`, pour ne pas dépendre de l'ordre d'énumération USB ;
+* les paramètres série suivent la documentation VE.Direct de Victron et restent
+  dans la configuration, à confirmer au premier branchement ;
+* seuls restent à préciser : la **référence exacte de l'interface VE.Direct/USB**
+  et le nom stable définitif du port. Aucun des deux ne bloque l'étape 2.
+
+### Retirés du périmètre initial (rév. 2)
+
+Horloge temps réel, avertisseur sonore, pilotage de luminosité et mise en veille
+de l'écran : **non implémentés**, non prévus dans la configuration, non affichés
+dans l'interface. Ils ne font pas partie du besoin initial et pourront être
+ajoutés plus tard sans remise en cause de l'architecture.
 
 ---
 
@@ -901,66 +1156,64 @@ proprement `NotImplementedError` — jamais un plantage de l'application.
 
 | # | Risque | Impact | Mesure prévue |
 |---|---|---|---|
-| **R-01** | **Usure et corruption de la carte microSD** (coupures d'alimentation brutales) | perte des réglages et calibrations | écriture atomique + copie de secours ; historique par lots ; journaux en mémoire volatile ; racine montée en lecture seule envisageable (`overlayfs`) avec une seule partition inscriptible pour `/var/lib/vanmonitor` |
-| **R-02** | **Lecture 1-Wire bloquante** : chaque DS18B20 demande environ 750 ms de conversion ; 5 sondes en série peuvent occuper plusieurs secondes | interface figée si mal fait | lecture dans un thread dédié, jamais dans le thread UI, période 10 s ; délai maximal par sonde et abandon en cas de dépassement |
-| **R-03** | **Bus 1-Wire long et bruité dans un fourgon** (vibrations, longueur, parasites) | valeurs erratiques ou sondes qui disparaissent | rejet des valeurs hors plage physique, filtre sur les variations brutales, statut `STALE`, ré-détection périodique du bus |
-| **R-04** | **Remplacement d'une sonde DS18B20** : l'identifiant unique change | zone orpheline | page Paramètres avec détection et réassociation, fonction « Identifier » ; l'application démarre normalement avec une zone non associée |
-| **R-05** | **Liaison SmartShunt instable** (sans fil : coupures, appairage ; filaire : port série qui change de nom) | valeurs batterie manquantes | interface isolée, reconnexion à intervalle croissant plafonné, statut `STALE` puis alerte technique, aucune boucle de reconnexion permanente |
-| **R-06** | **Autonomie restante fournie par le SmartShunt peu fiable** (valeur extrême, absente) | affichage trompeur | valeur affichée seulement si présente et dans une plage plausible, sinon la ligne disparaît |
-| **R-07** | **Perte d'une sonde utilisée par le chauffage** — le comportement de repli est un choix de sécurité, pas un choix technique | risque de gel ou de surchauffe | paramètre `on_sensor_loss` (`hold` par défaut) + alerte technique. **Décision à valider par toi** (voir §11) |
-| **R-08** | **Absence de retour de position sur les vannes** (si le matériel n'en fournit pas) | l'état affiché serait une supposition | `ValveState` distingue explicitement `OUVERTURE`/`FERMETURE` (transition estimée par temporisation) et `INCONNU` ; passage en `ERREUR` si la transition n'aboutit pas dans le délai |
-| **R-09** | **Cyclage rapide des vannes** autour d'un seuil | usure mécanique, consommation | hystérésis réelle (deux seuils distincts) **et** durée minimale de maintien d'état (120 s), contrainte `fermeture ≥ ouverture + 1 °C` imposée à la saisie |
-| **R-10** | **Ballottement du carburant et du réservoir d'eau en roulant** | valeurs qui sautent | filtre médian glissant puis moyenne exponentielle ; affichage arrondi (litres entiers, pourcentages entiers) pour éviter les chiffres qui dansent |
-| **R-11** | **Calibration incohérente saisie par l'utilisateur** (points non monotones, doublons) | conversion aberrante | validation stricte avant enregistrement, message explicite, conservation de la table précédente tant que la nouvelle est invalide |
-| **R-12** | **Réservoir d'eau de forme irrégulière** : les extrêmes (0 % et plein) sont les plus difficiles à calibrer | affichage faux en fin de réservoir | recommandation de placer des points rapprochés en début et fin de plage ; bornage explicite et indicateur « hors plage » plutôt qu'une extrapolation inventée |
-| **R-13** | **Heure système fausse sans Internet ni RTC** | historique horodaté n'importe comment | toute la logique utilise une horloge monotone ; l'historique enregistre aussi le temps écoulé depuis le démarrage ; l'heure murale est signalée comme non fiable tant qu'elle n'a pas été réglée |
-| **R-14** | **Saturation des journaux** en cas de panne répétée | usure disque, journaux illisibles | dédoublonnage des messages identiques sur une fenêtre de 5 minutes, journalisation d'un résumé (« 312 occurrences ») |
-| **R-15** | **Plantage de l'application** | perte totale de l'affichage et de la commande | redémarrage automatique par systemd (`Restart=always`, temporisation croissante) ; l'état des vannes au redémarrage est relu, jamais supposé |
-| **R-16** | **Performances graphiques du Raspberry Pi 4** avec un rafraîchissement trop fréquent | interface saccadée, chauffe | rafraîchissement limité à 2 Hz, seuls les libellés modifiés sont redessinés, aucune animation permanente |
-| **R-17** | **Divergence entre mode simulé et mode réel** (le simulateur ment) | anomalies découvertes seulement dans le fourgon | les mocks implémentent les mêmes interfaces et savent **simuler les pannes** (absence, valeur aberrante, délai, coupure de liaison, défaut de vanne), pas seulement le fonctionnement nominal |
-| **R-18** | **Licence PyQt5 (GPL)** | contrainte de diffusion si le projet est publié | sans objet pour un usage personnel ; bascule vers PySide6 (LGPL) possible, l'architecture ne change pas |
-| **R-19** | **Consommation électrique du Raspberry en stationnement** | décharge de la batterie auxiliaire | hors périmètre logiciel, mais l'application peut prévoir une mise en veille de l'écran ; à discuter |
+| **R-01** | **Usure et corruption de la carte microSD** (coupures d'alimentation brutales) | perte des réglages et calibrations | écriture atomique + copie de secours ; historique désactivé par défaut et écrit par lots ; journaux en mémoire volatile ; racine en lecture seule envisageable avec une seule partition inscriptible |
+| **R-02** | **Lecture 1-Wire lente ou bloquante** (conversion de l'ordre de la seconde par sonde) | acquisitions retardées, interface figée si mal conçu | thread dédié `temp_worker` ; lecture sous échéance avec `HardwareTimeout` ; chien de garde et redémarrage du worker ; le thread de contrôle ne lit que la mémoire (§1.2) |
+| **R-03** | **Bus 1-Wire long et bruité dans un fourgon** | valeurs erratiques, sondes qui disparaissent | rejet des valeurs hors plage physique, filtre sur les variations brutales, statut `STALE`, ré-détection périodique |
+| **R-04** | **Remplacement d'une sonde DS18B20** : l'identifiant change | zone orpheline | page Sondes : détection, réassociation, fonction « Identifier » ; démarrage normal avec une zone non associée |
+| **R-05** | **Liaison VE.Direct filaire** : port série qui change de nom, câble ou interface USB débranchée, trames tronquées | valeurs batterie manquantes | nom de port stable par règle udev ; délai d'expiration en lecture ; trames incomplètes ou incohérentes rejetées ; reconnexion à intervalle croissant plafonné ; statut `STALE` puis alerte technique, jamais de boucle de reconnexion permanente |
+| **R-06** | **Autonomie restante peu fiable** (valeur extrême, absente) | affichage trompeur | affichée seulement si présente et plausible, sinon la ligne disparaît |
+| **R-07** | **Perte d'une sonde utilisée par le chauffage** | risque de gel ou de surchauffe | **résolu (rév. 2)** : repli configuré **par circuit** — Local eau : ouverture ; Local batterie : ouverture ; Cabine : maintien du dernier état. Alerte technique dans les trois cas, mention `REPLI` sur la ligne du circuit |
+| **R-08** | **Absence de retour de position sur les clapets** (matériel non choisi) | un état affiché comme certain alors qu'il ne l'est pas | **traité en profondeur (rév. 2)** : séparation `commanded` / `confirmed` / `state_is_certain` ; un pilote sans retour renvoie toujours `INCONNU` en confirmé ; l'écran écrit « commandé » en toutes lettres ; interdiction explicite de déduire un état confirmé d'un ordre |
+| **R-09** | **Cyclage rapide des clapets** autour d'un seuil | usure mécanique, consommation | hystérésis réelle (deux seuils) **et** durée minimale de maintien d'état (120 s), contrainte `fermeture ≥ ouverture + 1 °C` |
+| **R-10** | **Ballottement du carburant et de l'eau en roulant** | valeurs qui sautent | filtre médian glissant puis moyenne exponentielle ; affichage arrondi |
+| **R-11** | **Calibration incohérente saisie par l'utilisateur** | conversion aberrante | validation stricte, message explicite, conservation de la table précédente |
+| **R-12** | **Réservoir d'eau de forme irrégulière** et **capacité inconnue** | pourcentage faux ou incalculable | capacité déduite du plus haut point de calibration, déclarable plus tard ; `--` tant que la table est vide ; bornage explicite plutôt qu'extrapolation |
+| **R-13** | **Heure système fausse** — pas d'Internet, et **aucune horloge temps réel prévue** | horodatage de l'historique incohérent après coupure | toute la logique fonctionne sur horloge **monotone** ; l'historique enregistre le temps écoulé depuis le démarrage en plus de l'heure murale ; l'heure murale est signalée non fiable tant qu'elle n'a pas été réglée |
+| **R-14** | **Saturation des journaux** en cas de panne répétée | usure disque, journaux illisibles | dédoublonnage sur 5 minutes puis résumé (« 312 occurrences ») |
+| **R-15** | **Plantage de l'application** | perte de l'affichage et de la commande | redémarrage automatique par systemd avec temporisation croissante ; au redémarrage, l'état des clapets est `INCONNU` tant qu'il n'est ni relu ni recommandé — jamais supposé |
+| **R-16** | **Thread d'acquisition définitivement bloqué** dans un appel système : Python ne permet pas de le tuer | fuite d'un thread, famille de capteurs perdue | limite assumée et contenue : thread *daemon* abandonné, remplaçant créé avec temporisation croissante, un seul à la fois, alerte technique ; isolation en sous-processus tenue en réserve si un pilote réel le justifie (§1.2) |
+| **R-17** | **Divergence entre mode simulé et mode réel** | anomalies découvertes seulement dans le fourgon | les mocks implémentent les mêmes interfaces et simulent les **pannes** : absence, valeur aberrante, lecture qui dure, coupure de liaison, défaut de clapet, **et clapet sans retour de position** |
+| **R-18** | **Résolution et modèle d'écran inconnus** | mise en page cassée sur la dalle réelle | aucun pixel absolu, échelle calculée à l'exécution, deux profils de disposition, enveloppe de validation 480 × 272 → 1024 × 600 |
+| **R-19** | **Performances graphiques** si le rafraîchissement est trop fréquent | interface saccadée, chauffe | 2 Hz, redessin des seuls éléments modifiés, aucune animation permanente |
+| **R-20** | **Consommation du Raspberry en stationnement** | décharge de la batterie auxiliaire | hors périmètre logiciel initial ; à traiter au niveau électrique |
 
 ---
 
-## 11. Points à valider avant l'étape 2
+## 11. Points encore ouverts
 
-1. **Capacité du réservoir d'eau propre** en litres (`105 L` est confirmé pour le
-   gasoil, l'eau propre reste à préciser).
-2. **Eaux grises** : calibration en pourcentage direct, ou en litres avec une
-   capacité déclarée ? (Le logiciel supporte les deux ; l'affichage restera en %.)
-3. **Comportement de repli du chauffage en cas de perte de sonde** (R-07) :
-   maintenir l'état, fermer, ou ouvrir ?
-4. **Résolution exacte de l'écran** si elle est déjà connue.
-5. **PyQt5 (GPL) accepté**, ou préférence pour PySide6 (LGPL) ?
-6. **Historique activé par défaut** (60 s / 24 h ≈ 1 400 enregistrements par
-   jour, quelques centaines de kilo-octets) ou désactivé par défaut ?
-7. **Seuils de chauffage de départ** : les valeurs proposées (5/8 °C pour les
-   locaux techniques, 12/16 °C pour la cabine) te conviennent-elles comme
-   valeurs initiales ?
+Aucun ne bloque l'étape 2.
+
+| # | Point | Quand il faudra trancher |
+|---|---|---|
+| 1 | **Seuils de chauffage Local batterie et Cabine** | à la mise au point, directement à l'écran. Restent `null` jusque-là, AUTO indisponible pour ces deux circuits |
+| 2 | **Capacité du réservoir d'eau propre** | facultatif : elle sera déduite de la calibration. Déclarable à tout moment |
+| 3 | **Capteurs de niveau et convertisseur** (H-1, H-2) | étape 11 |
+| 4 | **Actionneurs de clapets, avec ou sans retour de position** (H-3) | étape 11. Les deux cas sont déjà couverts par le modèle |
+| 5 | **Modèle et résolution d'écran** (H-6) | étape 11. L'interface est adaptative d'ici là |
+| 6 | **Référence de l'interface VE.Direct/USB et nom stable du port** | étape 6, au premier branchement |
 
 ---
 
 ## 12. Suite du projet
 
-Aucun code applicatif n'est produit à ce stade. Après validation de ce
-document, le développement suivra l'ordre convenu :
+Aucun code applicatif n'est produit à ce stade. Après validation finale de ce
+document :
 
 | Étape | Contenu | Livrable |
 |---|---|---|
-| 2 | Mode simulation | HAL complet + mocks + panneau de simulation |
+| 2 | Mode simulation | HAL complet + mocks (dont clapet sans retour de position) + workers + panneau de simulation |
 | 3 | Interface graphique | Accueil et Paramètres alimentés par la simulation |
 | 4 | Températures | `TemperatureService` + association des sondes |
 | 5 | Niveaux et calibrations | `CalibrationTable` + assistant de calibration |
-| 6 | SmartShunt | `BatteryService` + liaison réelle |
-| 7 | Chauffage | `HeatingController` + hystérésis + modes |
+| 6 | SmartShunt | `BatteryService` + liaison VE.Direct filaire |
+| 7 | Chauffage | `HeatingController` + hystérésis + modes + repli par circuit |
 | 8 | Alertes | `AlertEngine` |
-| 9 | Historique | `HistoryRecorder` |
+| 9 | Historique | `HistoryRecorder`, désactivé par défaut |
 | 10 | Paramètres et configuration | persistance complète |
 | 11 | Matériel réel | remplacement des mocks, une famille à la fois |
 | 12 | Démarrage automatique | systemd, plein écran, redémarrage sur incident |
 | 13 | Tests finaux | validation sur banc puis dans le fourgon |
 
 À chaque étape : le mode simulation reste fonctionnel, l'architecture n'est pas
-modifiée sans justification, et les fichiers modifiés sont fournis **entiers**
-avec leur emplacement exact.
+modifiée sans justification, aucune fonction validée n'est supprimée, et les
+fichiers modifiés sont fournis **entiers** avec leur emplacement exact.
