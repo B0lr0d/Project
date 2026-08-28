@@ -12,6 +12,9 @@ tout élément matériel non confirmé est marqué **MATERIEL À INTEGRER PLUS T
 et n'existe côté logiciel que sous forme d'interface abstraite.
 
 > **Journal des révisions**
+> **Rév. 4** — écarts constatés pendant l'implémentation de l'étape 2
+> (voir §13). Aucun changement d'architecture : deux fichiers ajoutés, une
+> dépendance retirée, une règle de fraîcheur ajoutée.
 > **Rév. 3** — le repli sur perte de sonde (`on_sensor_loss`) devient modifiable
 > depuis la page Paramètres, circuit par circuit, sous avertissement et
 > confirmation explicite. Valeurs par défaut inchangées.
@@ -238,7 +241,8 @@ Project/
 │   ├── core/
 │   │   ├── __init__.py
 │   │   ├── state.py                   # StateStore + LatestValue
-│   │   ├── workers.py                 # HardwareWorker + WorkerSupervisor + WorkerHealth
+│   │   ├── workers.py                 # HardwareWorker + WorkerSupervisor + ValveWorker
+│   │   ├── acquisition.py             # AcquisitionService (ajouté rév. 4, voir §13)
 │   │   ├── control_loop.py            # ControlWorker : tick 1 s, aucune I/O matérielle
 │   │   ├── commands.py                # CommandBus + dataclasses de commandes
 │   │   ├── health.py                  # fraîcheur, fautes, anti-rebond
@@ -273,6 +277,7 @@ Project/
 │   │   │   ├── alert_bar.py
 │   │   │   ├── numeric_keypad.py      # pavé numérique tactile
 │   │   │   └── touch_controls.py      # boutons/bascules dimensionnés en millimètres
+│   │   ├── snapshot_text.py           # rendu texte sans Qt (ajouté rév. 4, voir §13)
 │   │   └── sim_panel.py               # fenêtre de simulation
 │   │
 │   └── util/
@@ -282,15 +287,15 @@ Project/
 │       └── timebase.py                # horloge monotone pour la logique
 │
 └── tests/
-    ├── test_calibration.py            # interpolation, hors plage, incohérences, capacité déduite
-    ├── test_heating.py                # hystérésis, anti-cyclage, repli par circuit
-    ├── test_valve_state.py            # commandé vs confirmé, avec et sans retour de position
-    ├── test_workers.py                # délai d'expiration, worker bloqué, redémarrage
-    ├── test_alerts.py
-    ├── test_config_store.py
-    ├── test_tank_service.py
-    ├── test_imports.py                # core/ et ui/ n'importent pas hal/real ni hal/sim
-    └── test_resilience.py             # panne d'un capteur → le reste continue
+    ├── test_sim_hal.py                # mocks : pannes, clapets avec/sans retour   [étape 2]
+    ├── test_workers.py                # délai, worker bloqué, redémarrage          [étape 2]
+    ├── test_acquisition.py            # panne d'un capteur → le reste continue     [étape 2]
+    ├── test_config_store.py           # écriture atomique, fichier corrompu        [étape 2]
+    ├── test_imports.py                # core/ et ui/ n'importent pas hal/real|sim  [étape 2]
+    ├── test_sim_panel.py              # panneau de simulation                      [étape 2]
+    ├── test_calibration.py            # interpolation, hors plage, capacité déduite [étape 5]
+    ├── test_heating.py                # hystérésis, anti-cyclage, repli par circuit [étape 7]
+    └── test_alerts.py                 # seuils, réarmement, alertes techniques      [étape 8]
 ```
 
 ---
@@ -1279,3 +1284,37 @@ document :
 À chaque étape : le mode simulation reste fonctionnel, l'architecture n'est pas
 modifiée sans justification, aucune fonction validée n'est supprimée, et les
 fichiers modifiés sont fournis **entiers** avec leur emplacement exact.
+
+---
+
+## 13. Journal d'implémentation
+
+### Étape 2 — mode simulation (livrée)
+
+Cinq écarts par rapport au document validé. Aucun ne change l'architecture ;
+tous sont signalés ici comme convenu.
+
+| # | Écart | Raison |
+|---|---|---|
+| **É-1** | **Fichier ajouté** `core/acquisition.py` (`AcquisitionService`) | L'assemblage des threads et des emplacements de valeurs n'avait pas de place attitrée. Le loger dans `workers.py` aurait mélangé le mécanisme générique des threads avec la description de l'installation. |
+| **É-2** | **Fichier ajouté** `ui/snapshot_text.py` | Le rendu texte de l'état est partagé entre le panneau de simulation et le mode `--headless`. Sans ce module, le mode sans interface aurait dépendu de PyQt5, ce qui l'aurait rendu inutilisable là où il sert justement. |
+| **É-3** | `ConfigStore` **n'hérite plus de `QObject`** ; la notification passe par des fonctions de rappel (`add_listener`) au lieu d'un signal Qt | Le document prévoyait `ConfigStore(QObject)`, ce qui aurait fait dépendre `config/` et `core/` de Qt — donc rendu la logique métier intestable sans interface graphique et sans `QApplication`. L'interface s'abonne exactement de la même façon. |
+| **É-4** | **Règle ajoutée** : chaque mesure est datée de son **début**, et une mesure antérieure à celle déjà publiée est refusée (`LatestValue.set(..., measured_at=…)`) | Découvert en écrivant les tests du chien de garde : un thread déclaré bloqué puis remplacé peut se débloquer une minute plus tard et publier ce qu'il avait lu. Sans cette règle, une valeur périmée écrasait une valeur fraîche. C'est le complément indispensable de la limite assumée « on ne peut pas tuer un thread bloqué ». |
+| **É-5** | Une sonde **détectée absente** passe en `ABSENT` (`--`) et non en `FAULT` (« Erreur capteur ») | Le document définissait déjà ces deux statuts ; l'implémentation les distingue à la lecture (`is_present()`) au lieu de tout traiter en erreur. Une sonde débranchée n'est pas un capteur en défaut. |
+
+Également précisé à l'implémentation, sans contredire le document :
+
+* les observations de clapets sont transportées comme les autres grandeurs,
+  dans un `Sample` — ce qui distingue « actionneur non intégré » de « pas
+  encore lu » ;
+* `ValveWorker` relit l'état des clapets **avant** d'attendre une commande,
+  pour que l'écran les connaisse dès le démarrage ;
+* en simulation, une zone dont la sonde n'est pas associée est reliée
+  automatiquement à la sonde simulée correspondante, **sans écrire dans la
+  configuration** ;
+* tous les nombres affichés utilisent la **virgule** décimale.
+
+**Non livré à l'étape 2, conformément au découpage :** écran Accueil et écran
+Paramètres (étape 3), calibration (5), services métier (4 à 6), hystérésis (7),
+alertes (8), historique (9). Les modules `hal/real/` existent et lèvent
+`NotImplementedError` avec un message explicite.

@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vanmonitor"
+version = "0.2.0"
+description = "Monitoring et commande d'un fourgon aménagé (Raspberry Pi 4)"
+requires-python = ">=3.11"
+# Aucune dépendance obligatoire : le programme démarre et s'exécute en mode
+# simulation sans interface graphique. PyQt5 et pyserial sont déclarés en
+# extras, et importés au plus tard, pour que leur absence n'empêche rien.
+dependencies = []
+
+[project.optional-dependencies]
+gui = ["PyQt5>=5.15"]
+serial = ["pyserial>=3.5"]      # liaison VE.Direct filaire (étape 6)
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+vanmonitor = "vanmonitor.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+filterwarnings = ["error::DeprecationWarning"]

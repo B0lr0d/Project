@@ -1,0 +1,192 @@
+{
+  "config_version": 1,
+  "general": {
+    "simulation": false,
+    "fullscreen": true,
+    "ui_refresh_hz": 2
+  },
+  "workers": {
+    "watchdog_factor": 3,
+    "restart_backoff_s": [
+      5,
+      15,
+      60,
+      300
+    ]
+  },
+  "temperatures": {
+    "poll_period_s": 10,
+    "read_timeout_s": 3.0,
+    "stale_after_s": 60,
+    "valid_range_c": [
+      -40.0,
+      85.0
+    ],
+    "zones": {
+      "local_batterie": {
+        "label": "Local batterie",
+        "sensor_id": null,
+        "offset_c": 0.0,
+        "critical": true
+      },
+      "local_eau": {
+        "label": "Local eau",
+        "sensor_id": null,
+        "offset_c": 0.0,
+        "critical": true
+      },
+      "coffre": {
+        "label": "Coffre",
+        "sensor_id": null,
+        "offset_c": 0.0,
+        "critical": false
+      },
+      "cabine": {
+        "label": "Cabine",
+        "sensor_id": null,
+        "offset_c": 0.0,
+        "critical": true
+      },
+      "cellule": {
+        "label": "Cellule",
+        "sensor_id": null,
+        "offset_c": 0.0,
+        "critical": false
+      }
+    }
+  },
+  "tanks": {
+    "poll_period_s": 2,
+    "read_timeout_s": 1.0,
+    "stale_after_s": 30,
+    "filter": {
+      "median_window": 5,
+      "ema_alpha": 0.2
+    },
+    "eau_propre": {
+      "label": "Eau propre",
+      "display": [
+        "litres",
+        "percent"
+      ],
+      "unit": "litres",
+      "capacity_l": null,
+      "channel": "CH0",
+      "calibration": {
+        "points": [],
+        "updated_at": null
+      }
+    },
+    "eaux_grises": {
+      "label": "Eaux grises",
+      "display": [
+        "percent"
+      ],
+      "unit": "percent",
+      "capacity_l": null,
+      "channel": "CH1",
+      "calibration": {
+        "points": [],
+        "updated_at": null
+      }
+    },
+    "gasoil": {
+      "label": "Gasoil",
+      "display": [
+        "litres",
+        "percent"
+      ],
+      "unit": "litres",
+      "capacity_l": 105.0,
+      "channel": "CH2",
+      "calibration": {
+        "points": [],
+        "updated_at": null
+      }
+    }
+  },
+  "battery": {
+    "poll_period_s": 1.0,
+    "stale_after_s": 15,
+    "read_timeout_s": 2.0,
+    "reconnect_backoff_s": [
+      1,
+      2,
+      5,
+      10,
+      30
+    ],
+    "show_time_to_go": true,
+    "time_to_go_max_valid_min": 6000,
+    "link": {
+      "type": "vedirect_serial",
+      "port": null,
+      "baudrate": 19200
+    }
+  },
+  "heating": {
+    "control_period_s": 5,
+    "min_state_dwell_s": 120,
+    "transition_timeout_s": 60,
+    "min_threshold_delta_c": 1.0,
+    "command_timeout_s": 5.0,
+    "circuits": {
+      "local_eau": {
+        "label": "Local eau",
+        "zone": "local_eau",
+        "mode": "auto",
+        "open_below_c": 5.0,
+        "close_above_c": 8.0,
+        "on_sensor_loss": "open",
+        "driver": {
+          "type": "mock",
+          "params": {}
+        }
+      },
+      "local_batterie": {
+        "label": "Local batterie",
+        "zone": "local_batterie",
+        "mode": "manuel",
+        "open_below_c": null,
+        "close_above_c": null,
+        "on_sensor_loss": "open",
+        "driver": {
+          "type": "mock",
+          "params": {}
+        }
+      },
+      "cabine": {
+        "label": "Cabine",
+        "zone": "cabine",
+        "mode": "manuel",
+        "open_below_c": null,
+        "close_above_c": null,
+        "on_sensor_loss": "hold",
+        "driver": {
+          "type": "mock",
+          "params": {}
+        }
+      }
+    }
+  },
+  "alerts": {
+    "battery_soc_min_pct": 20,
+    "fresh_water_min_pct": 20,
+    "fuel_min_pct": 20,
+    "grey_water_max_pct": 80,
+    "rearm_margin_pct": 3,
+    "min_duration_s": 30,
+    "technical_alerts": true
+  },
+  "history": {
+    "enabled": false,
+    "sample_period_s": 300,
+    "retention_hours": 24,
+    "db_path": "/var/lib/vanmonitor/history.db",
+    "batch_size": 10
+  },
+  "logging": {
+    "level": "INFO",
+    "dedup_window_s": 300
+  }
+}

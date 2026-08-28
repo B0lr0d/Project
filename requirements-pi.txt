@@ -1,0 +1,17 @@
+# Raspberry Pi OS (Bookworm, 64 bits).
+#
+# PyQt5 s'installe par apt, pas par pip : le paquet système est compilé pour
+# l'ARM du Raspberry et testé avec la distribution. Le compiler soi-même prend
+# des heures et casse à la première mise à jour.
+#
+#     sudo apt install python3-pyqt5
+#
+# Les dépendances matérielles suivantes ne sont nécessaires qu'à partir de
+# l'étape où le matériel correspondant est intégré. Elles sont importées au
+# plus tard dans le code : leur absence n'empêche pas le programme de démarrer.
+#
+# pyserial : liaison VE.Direct filaire du SmartShunt (étape 6)
+pyserial>=3.5
+
+# Convertisseur analogique-numérique : MATERIEL À INTEGRER PLUS TARD (H-2)
+# Pilote des actionneurs de clapets : MATERIEL À INTEGRER PLUS TARD (H-3)

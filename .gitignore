@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+
+# Configuration et historique produits à l'exécution : jamais dans le dépôt.
+# Le gabarit livré est config/config.default.json.
+config.json
+config.json.bak
+config.json.tmp
+history.db

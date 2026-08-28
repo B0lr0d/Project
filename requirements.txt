@@ -1,0 +1,8 @@
+# Poste de développement (PC, mode simulation).
+#
+#     python -m venv .venv && source .venv/bin/activate
+#     pip install -r requirements.txt
+#     python -m vanmonitor --sim
+#
+PyQt5>=5.15
+pytest>=7.0
