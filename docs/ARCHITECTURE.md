@@ -12,6 +12,9 @@ tout élément matériel non confirmé est marqué **MATERIEL À INTEGRER PLUS T
 et n'existe côté logiciel que sous forme d'interface abstraite.
 
 > **Journal des révisions**
+> **Rév. 3** — le repli sur perte de sonde (`on_sensor_loss`) devient modifiable
+> depuis la page Paramètres, circuit par circuit, sous avertissement et
+> confirmation explicite. Valeurs par défaut inchangées.
 > **Rév. 2** — modèle d'acquisition à threads séparés avec délais d'expiration et
 > chien de garde ; liaison SmartShunt figée en VE.Direct filaire ; historique
 > désactivé par défaut (5 min / 24 h) ; seuils de chauffage explicitement
@@ -791,10 +794,11 @@ Notes :
   mode AUTO est refusé et l'écran affiche `SEUILS À DÉFINIR`. Aucune alerte
   n'est levée pour autant — ce n'est pas une panne.
 * `workers`, `min_state_dwell_s`, `transition_timeout_s`, `filter`,
-  `reconnect_backoff_s`, `read_timeout_s`, `logging` et `on_sensor_loss`
-  **ne sont pas modifiables dans la page Paramètres** (réglages techniques ou de
-  sécurité, inutiles au conducteur). Le repli par circuit y est affiché **en
-  lecture seule**, pour information.
+  `reconnect_backoff_s`, `read_timeout_s` et `logging` **ne sont pas modifiables
+  dans la page Paramètres** (réglages techniques inutiles au conducteur).
+* `on_sensor_loss` **est modifiable dans la page Paramètres**, circuit par
+  circuit (rév. 3), mais sous confirmation explicite : c'est un réglage de
+  sécurité (§8, section CHAUFFAGE).
 
 ---
 
@@ -1001,13 +1005,15 @@ Deux niveaux seulement : rail de sections à gauche, contenu à droite.
 │ CALIBRATION  │  Local eau                            [ AUTO ] [ MANUEL ] │
 │ SONDES       │    Ouverture   [   5,0 °C  ]   Fermeture  [   8,0 °C  ]   │
 │ HISTORIQUE   │    État : OUVERT (commandé)   [ OUVRIR ]  [ FERMER ]      │
-│              │    Repli si sonde perdue : ouverture                      │
+│              │    Repli si sonde perdue  ⚠                               │
+│              │      [ OUVRIR ] [ FERMER ] [ MAINTENIR ]                  │
 │              │  ───────────────────────────────────────────────────────  │
 │              │  Local batterie                       [ AUTO ] [ MANUEL ] │
 │              │    Ouverture   [    --     ]   Fermeture  [    --     ]   │
 │              │    ⚠ Seuils à définir — mode AUTO indisponible            │
 │              │    État : FERMÉ (commandé)    [ OUVRIR ]  [ FERMER ]      │
-│              │    Repli si sonde perdue : ouverture                      │
+│              │    Repli si sonde perdue  ⚠                               │
+│              │      [ OUVRIR ] [ FERMER ] [ MAINTENIR ]                  │
 └──────────────┴───────────────────────────────────────────────────────────┘
 ```
 
@@ -1017,7 +1023,8 @@ Règles communes :
   numérique plein écran** (`−` / `+`, `Annuler` / `Valider`). Aucun clavier
   système.
 * Modifications **appliquées immédiatement**, sauvegardées après 2 s. Pas de
-  bouton « Enregistrer » global.
+  bouton « Enregistrer » global. **Seule exception : le repli sur perte de
+  sonde**, qui demande une confirmation explicite (ci-dessous).
 * Valeur refusée → bandeau rouge explicite sous le champ, valeur précédente
   conservée.
 
@@ -1025,10 +1032,64 @@ Règles communes :
 Trois blocs nommés `Local eau`, `Local batterie`, `Cabine`. Pour chacun :
 bascule AUTO/MANUEL, seuil d'ouverture, seuil de fermeture, état courant avec la
 mention « commandé » quand il n'est pas confirmé, boutons `OUVRIR` / `FERMER`
-grisés en mode AUTO, et le repli configuré affiché **en lecture seule**.
+grisés en mode AUTO, et le **repli sur perte de sonde**.
 Contraintes : `fermeture ≥ ouverture + 1 °C` ; le bouton `AUTO` est désactivé
 tant que les deux seuils ne sont pas définis, avec le message
 `Seuils à définir — mode AUTO indisponible`.
+
+#### Repli sur perte de sonde — réglage de sécurité (rév. 3)
+
+Chaque circuit dispose d'un sélecteur à trois positions :
+`OUVRIR` · `FERMER` · `MAINTENIR`.
+
+Valeurs par défaut, inchangées :
+
+| Circuit | Repli par défaut |
+|---|---|
+| Local eau | **OUVRIR** |
+| Local batterie | **OUVRIR** |
+| Cabine | **MAINTENIR** |
+
+Le sélecteur est visuellement distingué des autres réglages : pictogramme
+d'avertissement, libellé `Repli si sonde perdue`, et une ligne d'explication
+sous le sélecteur rappelant ce que fait le choix actif.
+
+Contrairement à tous les autres réglages, **le changement n'est pas appliqué
+immédiatement** : il ouvre une fenêtre de confirmation.
+
+```
+  ┌────────────────────────────────────────────────────────────┐
+  │  ⚠   RÉGLAGE DE SÉCURITÉ                                   │
+  │                                                            │
+  │  Local eau — repli si la sonde ne répond plus              │
+  │                                                            │
+  │      OUVRIR   →   MAINTENIR                                │
+  │                                                            │
+  │  Si la sonde Local eau cesse de répondre, le circuit       │
+  │  restera dans son dernier état au lieu d'être ouvert.      │
+  │  Ce choix conditionne la protection contre le gel.         │
+  │                                                            │
+  │       [ ANNULER ]                    [ CONFIRMER ]         │
+  └────────────────────────────────────────────────────────────┘
+```
+
+Règles de la confirmation :
+
+* `ANNULER` est le choix par défaut (bouton mis en avant) ; fermer la fenêtre
+  sans répondre équivaut à annuler.
+* Le texte est composé à partir du circuit et de la valeur visée, et nomme
+  explicitement la conséquence :
+  * `OUVRIR` → « le circuit sera ouvert » ;
+  * `FERMER` → « le circuit sera fermé — **la protection contre le gel ne sera
+    plus assurée** » (formulation renforcée : c'est le choix le plus risqué) ;
+  * `MAINTENIR` → « le circuit restera dans son dernier état ».
+* Tant que la confirmation n'est pas donnée, le sélecteur reste sur l'ancienne
+  valeur : aucun état intermédiaire n'est enregistré.
+* Après confirmation : application immédiate, écriture différée habituelle
+  (2 s), et une ligne de journal indiquant l'ancienne et la nouvelle valeur.
+* Le repli reste sans effet tant que la sonde répond. Dans tous les cas, une
+  **alerte technique** est levée lorsqu'un repli s'active, quel que soit le
+  choix.
 
 ### Section ALERTES
 ```
@@ -1106,9 +1167,10 @@ la referme immédiatement, sans autre conséquence fonctionnelle.
 ### Non exposé dans Paramètres (volontairement)
 Périodes de scrutation, délais d'expiration, chien de garde, filtres,
 temporisations de clapets, délais de reconnexion, port série, niveau de
-journalisation, chemins de fichiers, mode simulation. Le repli par circuit y est
-affiché mais **non modifiable** (choix de sécurité, réglable dans
-`config.json`).
+journalisation, chemins de fichiers, mode simulation.
+
+Le repli par circuit, lui, **est modifiable** depuis la section CHAUFFAGE, sous
+avertissement et confirmation explicite (rév. 3).
 
 ---
 
