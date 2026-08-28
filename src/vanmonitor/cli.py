@@ -30,6 +30,10 @@ class Options:
     headless: bool
     duration_s: float | None
     log_level: str | None
+    #: Taille de fenêtre demandée. Sur le fourgon, c'est la dalle qui décide ;
+    #: sur un PC, cela permet d'éprouver les deux profils de disposition.
+    screen_size: tuple[int, int] = (800, 480)
+    no_sim_panel: bool = False
 
 
 def default_config_path() -> Path:
@@ -78,7 +82,25 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="niveau de journalisation (remplace la configuration)",
     )
+    parser.add_argument(
+        "--size", default=None, metavar="LxH",
+        help="taille de fenêtre, ex. 800x480 ou 480x272 (développement)",
+    )
+    parser.add_argument(
+        "--no-sim-panel", action="store_true",
+        help="mode simulation sans le panneau de simulation",
+    )
     return parser
+
+
+def _parse_size(text: str | None) -> tuple[int, int]:
+    if not text:
+        return (800, 480)
+    try:
+        width, height = text.lower().split("x", 1)
+        return max(320, int(width)), max(200, int(height))
+    except (ValueError, AttributeError):
+        return (800, 480)
 
 
 def parse_args(argv: list[str] | None = None) -> Options:
@@ -91,4 +113,6 @@ def parse_args(argv: list[str] | None = None) -> Options:
         headless=args.headless,
         duration_s=args.duration,
         log_level=args.log_level,
+        screen_size=_parse_size(args.size),
+        no_sim_panel=args.no_sim_panel,
     )

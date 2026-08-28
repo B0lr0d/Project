@@ -12,6 +12,9 @@ tout élément matériel non confirmé est marqué **MATERIEL À INTEGRER PLUS T
 et n'existe côté logiciel que sous forme d'interface abstraite.
 
 > **Journal des révisions**
+> **Rév. 5** — écrans Accueil et Paramètres implémentés (§13, étape 3). Deux
+> divergences entre la capture de référence et le texte de la demande sont
+> tranchées et signalées ; la couche d'assemblage métier est posée.
 > **Rév. 4** — écarts constatés pendant l'implémentation de l'étape 2
 > (voir §13). Aucun changement d'architecture : deux fichiers ajoutés, une
 > dépendance retirée, une règle de fraîcheur ajoutée.
@@ -1318,3 +1321,37 @@ tous sont signalés ici comme convenu.
 Paramètres (étape 3), calibration (5), services métier (4 à 6), hystérésis (7),
 alertes (8), historique (9). Les modules `hal/real/` existent et lèvent
 `NotImplementedError` avec un message explicite.
+
+### Étape 3 — interface graphique (livrée)
+
+#### Divergences tranchées entre la capture de référence et le texte
+
+| # | Point | Décision |
+|---|---|---|
+| **D-1** | Le texte demandait **orange pour les eaux grises** et **vert pour le gasoil** ; la capture de référence montre **gris** pour les eaux grises et **ambre** pour le gasoil | La capture a été suivie, puisque la demande était de la reproduire fidèlement. Les trois couleurs sont regroupées dans `TANK_COLORS` (`ui/theme.py`) : les permuter est une ligne |
+| **D-2** | La capture montre **cinq onglets** (Accueil, Chauffage, Niveaux, Températures, Paramètres) ; le texte demande une navigation **Accueil / Paramètres** uniquement, répétée dans les trois échanges | Le texte a été suivi : deux entrées, dans le style de barre de la capture. Les blocs Chauffage, Niveaux et Températures sont déjà sur l'accueil, des onglets dédiés feraient doublon |
+
+#### Écarts d'implémentation
+
+| # | Écart | Raison |
+|---|---|---|
+| **É-6** | **Fichier ajouté** `core/services.py` regroupant `TemperatureService`, `TankService`, `BatteryService` et `HeatingService` | L'arborescence prévoyait quatre fichiers ; chacun fait une trentaine de lignes et ils partagent le même contrat (instantané d'acquisition → grandeurs affichables). Quatre fichiers auraient coûté plus de navigation qu'ils n'auraient apporté de clarté |
+| **É-7** | La section Chauffage des Paramètres affiche **un circuit à la fois**, choisi par un sélecteur | Les empiler imposait de faire défiler la page pour atteindre le repli du troisième circuit — inacceptable pour un réglage de sécurité sur une dalle de 4,3 pouces |
+| **É-8** | Cible tactile ramenée à ≈ 38 px au lieu des 9 mm annoncés à l'étape 1 | Sur une dalle de 4,3 pouces en 800 × 480, 9 mm valent environ 75 px : la page Chauffage n'aurait tenu que quatre contrôles. Les cibles font 38 à 46 px (≈ 5 à 6 mm), ce qui reste confortable au doigt ; la barre de navigation, elle, est plus généreuse |
+| **É-9** | En simulation, un réservoir non calibré est converti par une **table de démonstration**, et l'écran de calibration l'annonce comme telle | Sans cela l'accueil afficherait `--` partout et la maquette serait invérifiable. La table n'est jamais écrite dans la configuration et n'existe pas sur le matériel réel |
+| **É-10** | La régulation **automatique** du chauffage n'est pas active | Elle reste l'étape 7. Un circuit en AUTO conserve son état ; l'écran n'affiche donc rien de faux, et le mode AUTO est refusé tant que les seuils ne sont pas définis |
+
+#### Points d'attention retenus dans l'interface
+
+* un état de clapet non confirmé se distingue **par la forme** (corps de vanne
+  évidé) autant que par la couleur, et porte le mot « commandé » en toutes
+  lettres — un œil qui distingue mal les teintes doit pouvoir trancher ;
+* une sonde débranchée affiche `--`, une sonde en défaut affiche
+  `Erreur capteur` : ce sont deux situations différentes ;
+* l'autonomie disparaît quand le SmartShunt ne la fournit pas, plutôt que
+  d'afficher « N/A » ;
+* aucune information technique n'apparaît sur l'écran principal. Le seul témoin
+  toléré est la pastille `SIM`, et le panneau de simulation reste une fenêtre
+  séparée ;
+* l'heure n'est affichée que si elle a été réglée : sans horloge temps réel ni
+  Internet, mieux vaut `--:--` qu'une heure fausse.

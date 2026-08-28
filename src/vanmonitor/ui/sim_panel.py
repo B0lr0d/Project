@@ -466,7 +466,9 @@ class SimulationPanel(QWidget):
 
         Aucune entrée-sortie matérielle : uniquement de la lecture mémoire.
         """
-        snapshot = self._app.state.get() or self._app.acquisition.snapshot()
+        # Vue brute de l'acquisition : le panneau montre ce que les capteurs
+        # renvoient, pas ce que l'écran du fourgon en fait.
+        snapshot = self._app.acquisition.snapshot()
 
         scrollbar = self._readout.verticalScrollBar()
         position = scrollbar.value()

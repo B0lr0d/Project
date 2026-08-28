@@ -21,8 +21,10 @@ from vanmonitor.constants import (
     ZoneId,
 )
 from vanmonitor.core.acquisition import AcquisitionService
+from vanmonitor.core.alerts import AlertEngine
 from vanmonitor.core.commands import CommandBus, ManualValveCommand
 from vanmonitor.core.control_loop import ControlWorker
+from vanmonitor.core.services import SnapshotBuilder
 from vanmonitor.core.state import StateStore
 from vanmonitor.hal.factory import build_hal
 from vanmonitor.hal.sim.sim_state import FaultMode
@@ -228,12 +230,16 @@ def test_stuck_sensor_is_replaced_and_the_rest_keeps_running(rig) -> None:
 
 
 def test_control_loop_publishes_without_touching_hardware(rig) -> None:
-    _config, _hal, _bus, acquisition = rig
+    config, _hal, _bus, acquisition = rig
     store = StateStore()
     received: list[object] = []
     store.add_listener(received.append)
 
-    control = ControlWorker(acquisition, store, period_s=0.05)
+    control = ControlWorker(
+        acquisition, store,
+        SnapshotBuilder(config, simulation=True), AlertEngine(config),
+        period_s=0.05,
+    )
     control.start()
     try:
         assert _wait_until(lambda: len(received) >= 3)
@@ -244,9 +250,9 @@ def test_control_loop_publishes_without_touching_hardware(rig) -> None:
     published = store.get()
     assert published is not None
     assert published.simulation is True
-    assert {health.name for health in published.workers} >= {
-        "temp_worker", "level_worker", "battery_worker",
-    }
+    # L'instantané publié parle le vocabulaire de l'écran, pas celui des capteurs.
+    assert published.temperatures[ZoneId.CABINE].label == "Cabine"
+    assert set(published.circuits) == set(CircuitId)
 
 
 def test_text_rendering_applies_the_display_rules(rig) -> None:

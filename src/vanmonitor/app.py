@@ -4,9 +4,9 @@ Il lit la configuration, construit le matériel (réel ou simulé), démarre les
 threads d'acquisition et la boucle de contrôle, puis rend la main à
 l'interface. Aucun autre module ne fait ce câblage.
 
-À l'étape 2, l'interface disponible est le **panneau de simulation** : il pilote
-le fourgon virtuel et montre, en regard, ce que la couche d'acquisition en
-perçoit réellement. L'écran Accueil et l'écran Paramètres arrivent à l'étape 3.
+En mode simulation, le panneau de simulation s'ouvre **à côté** de l'interface,
+dans sa propre fenêtre : l'écran principal reste exactement celui du fourgon,
+sans le moindre réglage de mise au point.
 """
 
 from __future__ import annotations
@@ -14,14 +14,15 @@ from __future__ import annotations
 import signal
 import sys
 import threading
-from dataclasses import dataclass
-from pathlib import Path
+from dataclasses import dataclass, field
 
 from .cli import Options, parse_args
 from .config import ConfigStore
 from .core.acquisition import AcquisitionService
+from .core.alerts import AlertEngine
 from .core.commands import CommandBus
 from .core.control_loop import ControlWorker
+from .core.services import SnapshotBuilder
 from .core.state import StateStore
 from .hal.factory import HalBundle, build_hal
 from .util.logging_setup import get_logger, setup_logging
@@ -38,12 +39,20 @@ class Application:
     command_bus: CommandBus
     acquisition: AcquisitionService
     state: StateStore
+    builder: SnapshotBuilder
+    alerts: AlertEngine
     control: ControlWorker
     options: Options
+    sensor_ids: list[str] = field(default_factory=list)
+    #: Associations que la simulation établit d'office (zone → sonde simulée).
+    implicit_bindings: dict = field(default_factory=dict)
+    screen_size: tuple[int, int] = (800, 480)
 
     def start(self) -> None:
         self.acquisition.start()
         self.control.start()
+        # Un premier tour immédiat : l'écran ne doit pas s'ouvrir vide.
+        self.control.tick()
 
     def stop(self) -> None:
         self.control.request_stop()
@@ -68,10 +77,9 @@ def build_application(options: Options) -> Application:
     command_bus = CommandBus()
     acquisition = AcquisitionService(hal, config, command_bus)
     state = StateStore()
-    control = ControlWorker(
-        acquisition, state,
-        period_s=lambda: 1.0,
-    )
+    builder = SnapshotBuilder(config, simulation=simulation)
+    alerts = AlertEngine(config)
+    control = ControlWorker(acquisition, state, builder, alerts, period_s=1.0)
 
     return Application(
         config=config,
@@ -79,9 +87,35 @@ def build_application(options: Options) -> Application:
         command_bus=command_bus,
         acquisition=acquisition,
         state=state,
+        builder=builder,
+        alerts=alerts,
         control=control,
         options=options,
+        sensor_ids=_available_sensor_ids(simulation),
+        implicit_bindings=_implicit_bindings(config, simulation),
+        screen_size=options.screen_size,
     )
+
+
+def _implicit_bindings(config: ConfigStore, simulation: bool) -> dict:
+    """Zones que la simulation relie automatiquement, sans rien écrire."""
+    if not simulation:
+        return {}
+    from .constants import ZONE_ORDER
+    from .hal.sim.sim_state import SIM_SENSOR_IDS
+    return {
+        zone: SIM_SENSOR_IDS[zone] for zone in ZONE_ORDER
+        if not config.get(f"temperatures.zones.{zone.value}.sensor_id")
+    }
+
+
+def _available_sensor_ids(simulation: bool) -> list[str]:
+    """Identifiants proposés dans la section Sondes des Paramètres."""
+    if simulation:
+        from .hal.sim.sim_state import SIM_SENSOR_IDS
+        return list(SIM_SENSOR_IDS.values())
+    from .hal.real.ds18b20 import scan_sensor_ids
+    return scan_sensor_ids()
 
 
 # ---------------------------------------------------------------------------
@@ -144,23 +178,30 @@ def _run_gui(app: Application) -> int:
         )
         return 2
 
-    from .ui.sim_panel import SimulationPanel
-
-    if not app.hal.simulation:
-        print(
-            "L'interface graphique de l'étape 2 est le panneau de simulation.\n"
-            "Relancer avec --sim, ou attendre l'étape 3 pour l'écran Accueil.",
-            file=sys.stderr,
-        )
-        return 2
+    from .ui.main_window import MainWindow
 
     qt_app = QApplication(sys.argv[:1])
-    panel = SimulationPanel(app)
-    if app.options.windowed:
-        panel.show()
+    window = MainWindow(app)
+
+    fullscreen = (bool(app.config.get("general.fullscreen", True))
+                  and not app.options.windowed)
+    if fullscreen:
+        window.showFullScreen()
     else:
-        panel.show()        # l'étape 12 mettra l'écran Accueil en plein écran
-    return qt_app.exec_()
+        window.show()
+
+    # Le panneau de simulation est une fenêtre à part : l'écran du fourgon ne
+    # contient aucun réglage de mise au point.
+    panel = None
+    if app.hal.simulation and not app.options.no_sim_panel:
+        from .ui.sim_panel import SimulationPanel
+        panel = SimulationPanel(app)
+        panel.show()
+
+    code = qt_app.exec_()
+    if panel is not None:
+        panel.close()
+    return code
 
 
 def main() -> None:     # pragma: no cover - point d'entrée
