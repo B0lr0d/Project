@@ -265,6 +265,263 @@ def test_the_waking_touch_triggers_no_command(qt_app, tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Le geste de réveil, quel que soit le flux par lequel la dalle l'expose
+# ---------------------------------------------------------------------------
+#
+# Une dalle tactile USB n'arrive pas toujours à Qt de la même façon : tactile
+# natif, souris synthétisée, ou les deux à la fois. Le programme ne choisit pas
+# — cela dépend du greffon de plateforme et de la pile d'entrée du système.
+# La règle doit donc tenir dans les trois cas, et « tenir » veut dire deux
+# choses : le réveil est demandé, et **aucun événement n'atteint le widget**.
+#
+# Le réveil est ici **asynchrone**, comme le vrai ``DisplayWorker`` : la fin du
+# geste arrive avec l'écran encore marqué endormi.
+
+
+class _DeferredWorker:
+    """Le thread de veille avec sa latence réelle.
+
+    Le vrai worker tourne dans un autre thread : entre la demande de réveil et
+    l'extinction effective du drapeau, les événements suivants du geste
+    continuent d'arriver. C'est le cas qui compte, et celui qu'un faux worker
+    synchrone masquerait.
+    """
+
+    def __init__(self, controller: DisplayController) -> None:
+        self._controller = controller
+        self.wake_requests = 0
+
+    def request_wake(self) -> None:
+        self.wake_requests += 1
+
+    def run_pending(self) -> None:
+        """Ce que le thread finit par faire, quand on décide qu'il l'a fait."""
+        if self.wake_requests:
+            self._controller.wake()
+
+
+def _recorder(widget):
+    """Espion posé sur le widget : note tout ce qui parvient jusqu'à lui."""
+    from PyQt5.QtCore import QEvent, QObject
+
+    class _Spy(QObject):
+        def __init__(self) -> None:
+            super().__init__()
+            self.seen: list[QEvent.Type] = []
+
+        def eventFilter(self, watched, event):     # noqa: N802 (API Qt)
+            self.seen.append(event.type())
+            return False
+
+    spy = _Spy()
+    widget.installEventFilter(spy)
+    return spy
+
+
+def _mouse(kind):
+    from PyQt5.QtCore import QPointF, Qt
+    from PyQt5.QtGui import QMouseEvent
+    return QMouseEvent(kind, QPointF(10.0, 10.0), Qt.LeftButton,
+                       Qt.LeftButton, Qt.NoModifier)
+
+
+def _touch(kind):
+    """Un événement tactile natif.
+
+    Sans point de contact : PyQt5 ne permet pas de construire un
+    ``QTouchEvent.TouchPoint``. Ce n'en est pas moins un vrai ``QTouchEvent``,
+    du bon type, et c'est le type que le filtre examine.
+    """
+    from PyQt5.QtCore import QEvent, Qt
+    from PyQt5.QtGui import QTouchDevice, QTouchEvent
+
+    device = QTouchDevice()
+    device.setType(QTouchDevice.TouchScreen)
+    state = {
+        QEvent.TouchBegin: Qt.TouchPointPressed,
+        QEvent.TouchUpdate: Qt.TouchPointMoved,
+        QEvent.TouchEnd: Qt.TouchPointReleased,
+    }[kind]
+    return QTouchEvent(kind, device, Qt.NoModifier, state, [])
+
+
+def _gesture(qt_app, guard, widget, events) -> None:
+    """Rejoue un geste comme Qt le ferait, filtre de l'application compris.
+
+    Qt consulte les filtres posés sur le ``QApplication`` **avant** ceux de
+    l'objet destinataire et avant ``event()`` : un filtre qui retourne ``True``
+    met fin à l'acheminement, et l'événement n'atteint personne. C'est
+    exactement ce que l'on reproduit ici — le filtre décide, et seul ce qu'il
+    laisse passer est réellement remis au widget.
+
+    Ce détour est nécessaire pour le flux tactile : ``QApplication.notify``
+    aiguille un ``QTouchEvent`` d'après ses **points de contact**, que PyQt5 ne
+    sait pas construire. Un événement tactile envoyé depuis un test n'atteint
+    donc jamais la boucle de distribution. Le flux souris, lui, est éprouvé de
+    bout en bout avec le filtre réellement installé sur le ``QApplication``
+    (voir ``test_the_waking_touch_triggers_no_command``).
+    """
+    for event in events:
+        if not guard.eventFilter(widget, event):
+            qt_app.sendEvent(widget, event)
+
+
+@pytest.fixture()
+def dark_screen(qt_app, tmp_path: Path):
+    """Un bouton sous un écran éteint, et de quoi observer ce qui l'atteint."""
+    from PyQt5.QtWidgets import QPushButton
+
+    from vanmonitor.ui.wake_guard import WakeGuard
+
+    controller, power = _controller(tmp_path, display={"sleep_delay_s": 60})
+    worker = _DeferredWorker(controller)
+    guard = WakeGuard(controller, worker)
+
+    clicks: list[str] = []
+    button = QPushButton("OUVRIR")
+    button.resize(120, 60)
+    button.clicked.connect(lambda: clicks.append("ouvrir"))
+    spy = _recorder(button)
+
+    controller.note_activity(now=0.0)
+    assert controller.tick(now=60.0) is True
+    assert power.is_off is True
+
+    yield button, guard, worker, controller, clicks, spy
+
+
+def _assert_woken_without_reaching_the_widget(guard, worker, controller,
+                                              clicks, spy, expected: int) -> None:
+    assert worker.wake_requests >= 1, "le geste n'a pas demandé le réveil"
+    worker.run_pending()
+    assert controller.is_asleep is False
+    assert spy.seen == [], (
+        "des événements ont atteint le widget sous le doigt : "
+        f"{[int(kind) for kind in spy.seen]}"
+    )
+    assert clicks == []
+    assert guard.swallowed_events == expected
+    assert guard.is_swallowing is False, "le filtre avale encore après le geste"
+
+
+def test_a_native_touch_gesture_is_fully_swallowed(qt_app, dark_screen) -> None:
+    """Flux 1 : événements tactiles natifs."""
+    from PyQt5.QtCore import QEvent
+
+    button, guard, worker, controller, clicks, spy = dark_screen
+    _gesture(qt_app, guard, button, [
+        _touch(QEvent.TouchBegin),
+        _touch(QEvent.TouchUpdate),
+        _touch(QEvent.TouchUpdate),
+        _touch(QEvent.TouchEnd),
+    ])
+    _assert_woken_without_reaching_the_widget(
+        guard, worker, controller, clicks, spy, expected=4,
+    )
+
+
+def test_a_synthesized_mouse_gesture_is_fully_swallowed(qt_app, dark_screen) -> None:
+    """Flux 2 : la dalle est exposée comme un pointeur, appui / déplacement /
+    relâchement — c'est le cas le plus courant sur Raspberry Pi OS."""
+    from PyQt5.QtCore import QEvent
+
+    button, guard, worker, controller, clicks, spy = dark_screen
+    _gesture(qt_app, guard, button, [
+        _mouse(QEvent.MouseButtonPress),
+        _mouse(QEvent.MouseMove),
+        _mouse(QEvent.MouseMove),
+        _mouse(QEvent.MouseButtonRelease),
+    ])
+    _assert_woken_without_reaching_the_widget(
+        guard, worker, controller, clicks, spy, expected=4,
+    )
+
+
+def test_an_interleaved_touch_and_mouse_gesture_is_fully_swallowed(
+    qt_app, dark_screen,
+) -> None:
+    """Flux 3 : tactile natif **doublé** d'une souris synthétisée.
+
+    Le relâchement souris arrive après le ``TouchEnd``. Refermer le geste sur
+    le premier relâchement venu le laisserait passer : c'est pour ce cas que le
+    filtre suit les deux flux séparément.
+    """
+    from PyQt5.QtCore import QEvent
+
+    button, guard, worker, controller, clicks, spy = dark_screen
+    _gesture(qt_app, guard, button, [
+        _touch(QEvent.TouchBegin),
+        _mouse(QEvent.MouseButtonPress),
+        _touch(QEvent.TouchUpdate),
+        _mouse(QEvent.MouseMove),
+        _touch(QEvent.TouchEnd),
+        _mouse(QEvent.MouseButtonRelease),
+    ])
+    _assert_woken_without_reaching_the_widget(
+        guard, worker, controller, clicks, spy, expected=6,
+    )
+
+
+def test_an_interrupted_gesture_never_blocks_the_interface(qt_app, dark_screen,
+                                                           monkeypatch) -> None:
+    """Un doigt dont le relâchement n'arrive jamais ne fige pas l'écran.
+
+    Doigt resté posé, événement perdu, geste annulé par le système : au bout de
+    ``MAX_SWALLOW_S`` le filtre cesse d'absorber, plutôt que de laisser une
+    interface inerte.
+    """
+    from PyQt5.QtCore import QEvent
+
+    from vanmonitor.ui import wake_guard
+
+    button, guard, worker, controller, clicks, spy = dark_screen
+
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(wake_guard, "monotonic", lambda: clock["now"])
+
+    # Le doigt se pose… et ne se relève jamais.
+    _gesture(qt_app, guard, button, [_touch(QEvent.TouchBegin)])
+    assert guard.is_swallowing is True
+    worker.run_pending()
+
+    clock["now"] += wake_guard.MAX_SWALLOW_S + 1.0
+    _gesture(qt_app, guard, button, [_touch(QEvent.TouchUpdate)])
+
+    assert guard.is_swallowing is False
+    assert spy.seen == []
+    _gesture(qt_app, guard, button, [_mouse(QEvent.MouseButtonPress),
+                              _mouse(QEvent.MouseButtonRelease)])
+    assert clicks == ["ouvrir"], "l'interface est restée inerte après le garde-fou"
+
+
+def test_the_tap_after_an_asynchronous_wake_is_not_eaten(qt_app, dark_screen) -> None:
+    """Le geste de réveil terminé, l'appui suivant agit — même si le réveil a
+    pris du temps.
+
+    La fin du geste de réveil arrive alors que l'écran est encore marqué
+    endormi. Rouvrir une absorption à ce moment-là, sans jamais la refermer,
+    ferait avaler le **deuxième** appui : celui que l'utilisateur veut voir agir.
+    """
+    from PyQt5.QtCore import QEvent
+
+    button, guard, worker, controller, clicks, spy = dark_screen
+
+    # Tout le geste de réveil arrive avant que le thread de veille n'ait agi.
+    _gesture(qt_app, guard, button, [_mouse(QEvent.MouseButtonPress),
+                              _mouse(QEvent.MouseButtonRelease)])
+    assert controller.is_asleep is True, "le réveil n'est plus asynchrone"
+    assert clicks == []
+    assert guard.is_swallowing is False, "le geste de réveil n'a pas été refermé"
+
+    worker.run_pending()
+    assert controller.is_asleep is False
+
+    _gesture(qt_app, guard, button, [_mouse(QEvent.MouseButtonPress),
+                              _mouse(QEvent.MouseButtonRelease)])
+    assert clicks == ["ouvrir"], "le premier appui utile a été avalé"
+
+
+# ---------------------------------------------------------------------------
 # 6, 7, 8 — le Raspberry, lui, ne dort pas
 # ---------------------------------------------------------------------------
 

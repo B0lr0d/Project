@@ -14,6 +14,10 @@ tout élément matériel non confirmé est marqué **MATERIEL À INTEGRER PLUS T
 et n'existe côté logiciel que sous forme d'interface abstraite.
 
 > **Journal des révisions**
+> **Rév. 9** — vérification du geste de réveil quel que soit le flux par lequel
+> la dalle tactile est exposée à Qt (tactile natif, souris synthétisée, les deux
+> à la fois). Deux défauts trouvés et corrigés dans `ui/wake_guard.py` (§13,
+> étape 4bis). Étape 4bis définitivement validée.
 > **Rév. 8** — écran de référence figé (Waveshare 5" HDMI LCD (H) V4, H-6 clos)
 > et **veille de l'écran** : seul l'affichage s'éteint, le Raspberry et tous ses
 > threads restent actifs, et le premier toucher ne fait que rallumer (§13,
@@ -1374,7 +1378,8 @@ Raspberry, et rien de ce que le système surveille ne s'interrompt.
 | **R-19** | **Performances graphiques** si le rafraîchissement est trop fréquent | interface saccadée, chauffe | 2 Hz, redessin des seuls éléments modifiés, aucune animation permanente |
 | **R-20** | **Consommation du Raspberry en stationnement** | décharge de la batterie auxiliaire | hors périmètre logiciel initial ; à traiter au niveau électrique. La veille d'écran (rév. 8) réduit la consommation de la dalle, mais **pas celle du Raspberry** : elle n'est pas une réponse à ce risque |
 | **R-21** | **Méthode d'extinction de l'écran inopérante** sur la pile graphique réellement installée (rév. 8) | veille silencieusement sans effet, ou pire : écran noir qui ne se rallume pas | trois méthodes essayées et choix forçable (`display.sleep_method`) ; l'indisponibilité est **affichée** dans les Paramètres ; un échec d'extinction **ou** de rallumage laisse l'état interne à « allumé », pour ne jamais avaler le toucher suivant ; rallumage systématique à l'arrêt du programme |
-| **R-22** | **Le toucher de réveil active ce qui se trouve sous le doigt** (rév. 8) | ouverture d'un clapet ou modification d'un seuil sans intention, sur un écran qu'on ne voyait pas | le geste de réveil entier — appui, déplacements, relâchement — est absorbé par un filtre posé sur l'application (`ui/wake_guard.py`) ; garde-fou de 2 s si le relâchement n'arrive jamais |
+| **R-22** | **Le toucher de réveil active ce qui se trouve sous le doigt** (rév. 8) | ouverture d'un clapet ou modification d'un seuil sans intention, sur un écran qu'on ne voyait pas | le geste de réveil entier — appui, déplacements, relâchement — est absorbé par un filtre posé sur l'application (`ui/wake_guard.py`) ; garde-fou de 2 s si le relâchement n'arrive jamais. **Renforcé en rév. 9** : chaque flux d'entrée (tactile natif, souris synthétisée, clavier) est suivi séparément, l'absorption ne s'arrêtant que lorsque tous ceux vus s'ouvrir se sont refermés |
+| **R-23** | **Le réveil est asynchrone** : la fin du geste arrive avec l'écran encore marqué endormi (rév. 9) | rouvrir une absorption sans la refermer ferait avaler le premier appui utile de l'utilisateur | le filtre ouvre sa fenêtre d'absorption une seule fois par geste et la referme sur le relâchement, que le réveil ait abouti ou non ; vérifié avec un réveil différé, tel que le thread réel le produit |
 
 ---
 
@@ -1697,6 +1702,38 @@ aucun délai supplémentaire, et le deuxième appui agit.
 Le même filtre sert à repousser la veille : toute interaction, réveil compris,
 remet le compteur d'inactivité à zéro.
 
+#### Trois flux d'entrée, une seule règle (vérifié en rév. 9)
+
+Une dalle tactile USB n'arrive pas toujours à Qt de la même façon, et le
+programme ne choisit pas : cela dépend du greffon de plateforme, de la pile
+d'entrée et de la configuration du système.
+
+| Flux | Ce que le filtre reçoit |
+|---|---|
+| **tactile natif** | `TouchBegin` · `TouchUpdate` · `TouchEnd` (ou `TouchCancel`) |
+| **souris synthétisée** | la dalle est exposée comme un pointeur : `MouseButtonPress` · `MouseMove` · `MouseButtonRelease` |
+| **les deux à la fois** | Qt peut doubler un événement tactile non consommé d'un événement souris synthétisé |
+
+Le filtre ne cherche pas à deviner lequel est utilisé : il **suit chaque flux
+séparément** (souris, tactile, clavier) et n'a fini d'absorber que lorsque tous
+ceux qu'il a vus s'ouvrir se sont refermés. Une molette ou un déplacement, qui
+n'ouvrent aucun geste, sont absorbés sans prolonger l'absorption.
+
+Deux défauts ont été trouvés par cette vérification et corrigés :
+
+* **le relâchement du troisième flux passait.** Refermer le geste sur le
+  premier relâchement venu laissait passer le relâchement souris arrivant après
+  le `TouchEnd`. Inoffensif sur un `QPushButton` — Qt ignore un relâchement sans
+  appui — mais la règle demandée est qu'**aucun** événement n'atteigne le
+  widget, pas qu'il soit sans effet ;
+* **le deuxième appui pouvait être avalé.** Le réveil ayant lieu dans un autre
+  thread, la fin du geste de réveil arrive avec l'écran encore marqué endormi.
+  L'ancienne version rouvrait alors une absorption sans jamais la refermer, et
+  mangeait l'appui suivant — le premier appui utile de l'utilisateur. Ce défaut
+  n'apparaissait qu'avec un réveil **asynchrone**, c'est-à-dire dans la
+  configuration réelle ; les tests de l'étape 4bis, qui réveillaient de façon
+  synchrone, le masquaient.
+
 #### Une veille qui échoue le dit
 
 La méthode d'extinction dépend de la pile graphique installée, pas seulement de
@@ -1731,13 +1768,26 @@ un noir derrière soi.
 
 #### Vérifications ajoutées
 
-`tests/test_display_sleep.py` — 13 tests, dont les neuf demandés : déclenchement
-après le délai configuré ; aucune veille quand elle est désactivée ; remise à
-zéro du compteur à chaque interaction ; premier toucher = réveil seul ; premier
-toucher ne déclenchant aucune commande ; acquisitions, chaîne du chauffage et
-alertes qui continuent écran éteint ; délai des Paramètres réellement appliqué.
-Les quatre autres couvrent la désactivation pendant que l'écran dort, une
-méthode d'extinction en panne et une méthode indisponible.
+`tests/test_display_sleep.py` — 18 tests, dont les neuf demandés à l'étape 4bis :
+déclenchement après le délai configuré ; aucune veille quand elle est
+désactivée ; remise à zéro du compteur à chaque interaction ; premier toucher =
+réveil seul ; premier toucher ne déclenchant aucune commande ; acquisitions,
+chaîne du chauffage et alertes qui continuent écran éteint ; délai des
+Paramètres réellement appliqué. S'y ajoutent la désactivation pendant que
+l'écran dort, une méthode d'extinction en panne, une méthode indisponible.
+
+Cinq tests couvrent le geste de réveil lui-même (rév. 9) : les trois flux
+d'entrée ci-dessus, un geste dont le relâchement n'arrive jamais, et l'appui qui
+suit un réveil **asynchrone**. Ces cinq-là vérifient deux choses à chaque fois —
+le réveil est demandé, et **aucun événement n'atteint le widget**.
+
+Une limite assumée : `QApplication.notify` aiguille un `QTouchEvent` d'après ses
+**points de contact**, que PyQt5 ne sait pas construire. Un événement tactile
+émis depuis un test n'atteint donc jamais la boucle de distribution. Les tests
+des flux appellent par conséquent `eventFilter` comme Qt l'appelle, et ne
+remettent au widget que ce que le filtre laisse passer — la sémantique exacte
+d'un filtre posé sur le `QApplication`. Le flux souris, lui, est éprouvé de bout
+en bout avec le filtre réellement installé sur le `QApplication`.
 
 Les délais sont pilotés par une horloge explicite : un test de veille de cinq
 minutes ne dure pas cinq minutes.
