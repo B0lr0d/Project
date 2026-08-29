@@ -20,10 +20,10 @@ from __future__ import annotations
 
 from ..constants import (
     CIRCUIT_ORDER,
-    ConfirmedState,
     Status,
     TANK_ORDER,
     ValveCommand,
+    ValveState,
     ZONE_ORDER,
 )
 from ..models import AcquisitionSnapshot, Sample, ValveObservation
@@ -101,24 +101,37 @@ def format_valve(sample: Sample | None) -> str:
         return f"{'--':<12}  {'':<28}  pas encore lu"
 
     commanded = COMMAND_LABELS.get(observation.commanded, "?")
+    confirmed = observation.confirmed.value.upper()
+
+    # Même vocabulaire que l'écran : OUVERTE / FERMÉE sont réservés aux
+    # positions confirmées par un retour de position réel.
     if observation.fault:
-        shown = "ERREUR"
-    else:
-        shown = observation.display_state.value.upper()
-
-    if observation.state_is_certain:
+        shown, certainty = "DÉFAUT", "actionneur en défaut"
+    elif observation.display_state is ValveState.OUVERTURE:
+        shown, certainty = "OUVERTURE", "course en cours"
+    elif observation.display_state is ValveState.FERMETURE:
+        shown, certainty = "FERMETURE", "course en cours"
+    elif observation.state_is_certain:
+        shown = ("OUVERTE" if observation.display_state is ValveState.OUVERT
+                 else "FERMÉE")
         certainty = "confirmé par le matériel"
-        confirmed = observation.confirmed.value.upper()
-    else:
-        certainty = "commandé — non confirmé"
-        confirmed = (
-            "INCONNU" if observation.confirmed is ConfirmedState.INCONNU
-            else observation.confirmed.value.upper()
+    elif observation.commanded is ValveCommand.OPEN:
+        shown, certainty = "OUVERTURE COMMANDÉE", (
+            "aucun retour de position" if not observation.feedback_available
+            else "non confirmé"
         )
-        if not observation.feedback_available:
-            certainty = "commandé — aucun retour de position"
+    elif observation.commanded is ValveCommand.CLOSE:
+        shown, certainty = "FERMETURE COMMANDÉE", (
+            "aucun retour de position" if not observation.feedback_available
+            else "non confirmé"
+        )
+    else:
+        shown, certainty = "INCONNU", (
+            "aucun retour de position" if not observation.feedback_available
+            else "aucun ordre transmis"
+        )
 
-    return f"{shown:<11} cmd {commanded:<7} conf {confirmed:<8} {certainty}"
+    return f"{shown:<20} cmd {commanded:<7} conf {confirmed:<8} {certainty}"
 
 
 def format_snapshot(snapshot: AcquisitionSnapshot) -> str:

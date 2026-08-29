@@ -79,10 +79,31 @@ class SimBattery:
     consumed_ah: float = -12.0
     time_to_go_min: int | None = 1080
     time_to_go_available: bool = True
+    #: Recalcule l'autonomie à partir de la charge restante et du courant,
+    #: comme le ferait un vrai SmartShunt. Sans cela, baisser l'état de charge
+    #: dans le panneau de simulation laisserait une autonomie inchangée, ce qui
+    #: donnerait à croire à un affichage figé.
+    time_to_go_auto: bool = True
 
     @property
     def power_w(self) -> float:
         return self.voltage_v * self.current_a
+
+    def computed_time_to_go_min(self) -> int | None:
+        """Autonomie déduite de l'état de charge et du courant de décharge.
+
+        Un SmartShunt ne l'annonce pas en charge ni à courant nul : il rend
+        alors « infini », que l'interface traite comme une valeur absente.
+        """
+        if self.current_a >= -0.05:
+            return None                 # en charge ou à l'arrêt
+        # Capacité totale déduite de ce qui a été consommé pour arriver ici.
+        missing = 1.0 - self.soc_percent / 100.0
+        if missing <= 0.01 or self.consumed_ah >= 0:
+            return None
+        capacity_ah = abs(self.consumed_ah) / missing
+        remaining_ah = capacity_ah * self.soc_percent / 100.0
+        return max(0, int(remaining_ah / abs(self.current_a) * 60))
 
 
 @dataclass
@@ -194,7 +215,10 @@ class SimState:
     # ------------------------------------------------------------------
     def battery(self) -> SimBattery:
         with self._lock:
-            return SimBattery(**vars(self._battery))
+            battery = SimBattery(**vars(self._battery))
+        if battery.time_to_go_auto:
+            battery.time_to_go_min = battery.computed_time_to_go_min()
+        return battery
 
     def update_battery(self, **fields: object) -> None:
         with self._lock:

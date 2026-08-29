@@ -154,7 +154,7 @@ class CalibrationSettings(SettingsSection):
                           color=theme.TEXT, align=Qt.AlignRight | Qt.AlignVCenter),
                     row, 1)
                 delete = QPushButton("Suppr.")
-                delete.setMinimumHeight(metrics.px(28))
+                delete.setProperty("compact", "true")
                 delete.setEnabled(not demo)     # rien à supprimer dans une démo
                 delete.clicked.connect(
                     lambda _checked, raw=point.raw: self._remove(raw)

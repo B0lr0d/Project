@@ -334,9 +334,18 @@ class SimulationPanel(QWidget):
         )
         grid.addWidget(provided, 5, 1, 1, 2)
 
+        # Décoché, l'autonomie garde la valeur saisie ci-dessus : c'est le seul
+        # moyen de vérifier qu'une valeur invraisemblable est bien écartée.
+        auto = QCheckBox("autonomie recalculée par le shunt (charge / courant)")
+        auto.setChecked(battery.time_to_go_auto)
+        auto.toggled.connect(
+            lambda checked: self._sim.update_battery(time_to_go_auto=bool(checked))
+        )
+        grid.addWidget(auto, 6, 1, 1, 2)
+
         combo = _fault_combo()
-        grid.addWidget(QLabel("Liaison VE.Direct"), 6, 0)
-        grid.addWidget(combo, 6, 1, 1, 2)
+        grid.addWidget(QLabel("Liaison VE.Direct"), 7, 0)
+        grid.addWidget(combo, 7, 1, 1, 2)
         combo.currentIndexChanged.connect(
             lambda index, combo=combo: self._sim.set_battery_fault(combo.itemData(index))
         )

@@ -150,6 +150,8 @@ def validate(raw: Any) -> tuple[dict[str, Any], list[str]]:
     _check_bool(general, "fullscreen", general_defaults, warnings, "general")
     _check_number(general, "ui_refresh_hz", general_defaults, warnings, "general",
                   minimum=0.2, maximum=30)
+    _check_number(general, "screen_diagonal_in", general_defaults, warnings, "general",
+                  minimum=2.0, maximum=32.0)
 
     # --- threads d'acquisition -----------------------------------------
     workers, workers_defaults = config["workers"], defaults["workers"]

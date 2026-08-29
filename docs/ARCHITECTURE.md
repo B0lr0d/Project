@@ -12,6 +12,9 @@ tout élément matériel non confirmé est marqué **MATERIEL À INTEGRER PLUS T
 et n'existe côté logiciel que sous forme d'interface abstraite.
 
 > **Journal des révisions**
+> **Rév. 6** — trois corrections après relecture de l'étape 3 : vocabulaire des
+> clapets sans retour de position, cibles tactiles dimensionnées en
+> millimètres réels, vérification de l'autonomie SmartShunt (§13).
 > **Rév. 5** — écrans Accueil et Paramètres implémentés (§13, étape 3). Deux
 > divergences entre la capture de référence et le texte de la demande sont
 > tranchées et signalées ; la couche d'assemblage métier est posée.
@@ -1355,3 +1358,70 @@ alertes (8), historique (9). Les modules `hal/real/` existent et lèvent
   séparée ;
 * l'heure n'est affichée que si elle a été réglée : sans horloge temps réel ni
   Internet, mieux vaut `--:--` qu'une heure fausse.
+
+#### Corrections apportées après relecture
+
+**C-1 — Vocabulaire des clapets.** « OUVERTE » et « FERMÉE » décrivent
+désormais **exclusivement une position physique confirmée** par un retour de
+position réel. Sans confirmation, l'écran annonce la commande et non une
+position :
+
+| Situation | Libellé | Forme |
+|---|---|---|
+| Position confirmée par le matériel | `OUVERTE` · `FERMÉE` | corps de vanne plein |
+| Ordre transmis, rien de confirmé | `OUVERTURE COMMANDÉE` · `FERMETURE COMMANDÉE` | corps évidé, orange |
+| Course en cours, constatée | `OUVERTURE` · `FERMETURE` | corps évidé, ambre |
+| Aucun ordre, aucun retour | `INCONNU` + « sans retour de position » | corps évidé, gris |
+| Défaut d'actionneur | `DÉFAUT` | corps barré, rouge |
+
+La mention « commandé » ajoutée sous l'état a disparu : elle faisait double
+emploi avec un libellé qui porte désormais lui-même l'information. Le modèle
+`commandé` / `confirmé` de l'étape 1 est inchangé — seule sa formulation à
+l'écran l'est. Le rendu texte (`--headless`, panneau de simulation) emploie le
+même vocabulaire.
+
+**C-2 — Cibles tactiles dimensionnées en millimètres réels.** Elles ne sont
+plus exprimées en pixels mais converties depuis la **taille physique** de la
+dalle, via une nouvelle clé `general.screen_diagonal_in` (4,3" par défaut, la
+borne la plus contraignante de la fourchette annoncée) :
+
+| Dalle | Résolution | Cible tactile | Navigation |
+|---|---|---|---|
+| 4,3" | 800 × 480 | 72 px (8,4 mm) | 48 px |
+| 5" | 800 × 480 | 66 px (9,0 mm) | 48 px |
+| 7" | 1024 × 600 | 60 px (9,0 mm) | 60 px |
+
+L'écart **É-8** de la rév. 5 est donc annulé : la cible de 9 mm est tenue,
+bornée à 15 % de la hauteur pour qu'une page ne se réduise pas à deux réglages.
+Toutes les commandes citées à la relecture en bénéficient : AUTO/MANUEL,
+OUVRIR/FERMER, champs de seuils, choix du repli, pavé numérique, boutons de
+confirmation.
+
+Conséquence assumée : **la page Paramètres défile verticalement**. La barre de
+défilement est donc rendue visible en permanence et la page se tire au doigt
+(défilement cinétique), plutôt que de viser une barre étroite. **L'écran
+Accueil, lui, reste entièrement visible sans défilement** — c'est pourquoi la
+barre de navigation garde une cible plus mesurée, plafonnée à 10 % de la
+hauteur.
+
+**C-3 — Autonomie SmartShunt : vérifiée, et verrouillée par des tests.** Le
+comportement était déjà correct ; il est désormais prouvé
+(`tests/test_battery_autonomy.py`, 15 tests) :
+
+* une lecture `STALE` ou `FAULT` ne produit **aucune** grandeur affichable —
+  ni autonomie, ni état de charge, ni tension. La dernière valeur reçue reste
+  dans le `LatestValue` pour le diagnostic, mais elle n'atteint jamais l'écran ;
+* la péremption se calcule depuis la dernière lecture **réussie**, pas depuis la
+  dernière tentative ;
+* une autonomie nulle, négative ou supérieure à `time_to_go_max_valid_min` est
+  écartée, sans que le reste de la lecture soit perdu ;
+* une autonomie absente fait disparaître la ligne : jamais de « N/A » ;
+* de bout en bout, couper la liaison VE.Direct efface l'autonomie de
+  l'instantané publié.
+
+L'observation qui a motivé la vérification (17 % d'état de charge et 18 h
+d'autonomie) venait bien du shunt simulé, dont l'autonomie était une constante.
+Le SmartShunt simulé la **recalcule** maintenant à partir de la charge restante
+et du courant, comme le ferait le matériel : le même cas affiche désormais
+2 h 20. Il rend « aucune autonomie » en charge ou à courant nul, ce qu'un vrai
+shunt annonce comme infini.

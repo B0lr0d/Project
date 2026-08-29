@@ -29,7 +29,10 @@ class MainWindow(QWidget):
         self._app = application
 
         size = application.screen_size
-        self._metrics = metrics_for(*size)
+        self._metrics = metrics_for(
+            *size,
+            application.config.get("general.screen_diagonal_in"),
+        )
         self._profile = profile_for(*size)
         self.resize(*size)
         self.setMinimumSize(400, 240)

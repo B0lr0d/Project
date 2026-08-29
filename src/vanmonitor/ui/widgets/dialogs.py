@@ -119,18 +119,18 @@ class NumericKeypad(QDialog):
         ]
         for text, row, column in keys:
             button = QPushButton(text)
-            button.setMinimumHeight(metrics.px(48))
+            button.setMinimumHeight(metrics.touch_min)
             button.clicked.connect(lambda _checked, text=text: self._press(text))
             grid.addWidget(button, row, column)
 
         minus = QPushButton("−/+")
-        minus.setMinimumHeight(metrics.px(48))
+        minus.setMinimumHeight(metrics.touch_min)
         minus.clicked.connect(lambda: self._press("-"))
         grid.addWidget(minus, 3, 3)
 
         for row, step in enumerate((10.0, 1.0, 0.5)):
             plus = QPushButton(f"+{step:g}".replace(".", ","))
-            plus.setMinimumHeight(metrics.px(48))
+            plus.setMinimumHeight(metrics.touch_min)
             plus.clicked.connect(lambda _checked, step=step: self._nudge(step))
             grid.addWidget(plus, row, 3)
 
@@ -139,10 +139,10 @@ class NumericKeypad(QDialog):
         actions = QHBoxLayout()
         actions.setSpacing(metrics.px(6))
         cancel = QPushButton("Annuler")
-        cancel.setMinimumHeight(metrics.px(46))
+        cancel.setMinimumHeight(metrics.touch_min)
         cancel.clicked.connect(self.reject)
         confirm = QPushButton("Valider")
-        confirm.setMinimumHeight(metrics.px(46))
+        confirm.setMinimumHeight(metrics.touch_min)
         confirm.setProperty("accent", "true")
         confirm.clicked.connect(self._accept)
         actions.addWidget(cancel, 1)
@@ -226,11 +226,11 @@ class ConfirmDialog(QDialog):
         actions = QHBoxLayout()
         actions.setSpacing(metrics.px(8))
         cancel = QPushButton("Annuler")
-        cancel.setMinimumHeight(metrics.px(46))
+        cancel.setMinimumHeight(metrics.touch_min)
         cancel.setProperty("accent", "true")     # le choix par défaut
         cancel.clicked.connect(self.reject)
         confirm = QPushButton("Confirmer")
-        confirm.setMinimumHeight(metrics.px(46))
+        confirm.setMinimumHeight(metrics.touch_min)
         if severe:
             confirm.setProperty("danger", "true")
         confirm.clicked.connect(self.accept)

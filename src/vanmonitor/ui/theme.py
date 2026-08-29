@@ -80,19 +80,44 @@ def tint(color: str, ratio: float, over: str = BACKGROUND) -> str:
 #: Hauteur de référence des maquettes.
 BASE_HEIGHT = 480
 
-#: Cible tactile minimale, en millimètres puis convertie selon la dalle.
+#: Cible tactile visée, en millimètres réels sur la dalle.
+#:
+#: 9 mm est la recommandation d'accessibilité courante pour un doigt. Elle est
+#: convertie en pixels d'après la taille **physique** de l'écran, pas d'après sa
+#: résolution : sur une dalle de 4,3 pouces en 800 × 480, 9 mm valent environ
+#: 77 px, contre 66 px sur une dalle de 5 pouces de même résolution.
 MIN_TOUCH_MM = 9.0
+
+#: Diagonale supposée tant que l'écran n'est pas choisi. La borne basse de la
+#: fourchette 4,3"–5" est retenue : c'est le cas le plus contraignant, et
+#: surdimensionner légèrement une cible tactile ne gêne personne.
+DEFAULT_DIAGONAL_IN = 4.3
+
+#: Une cible tactile ne peut pas occuper plus que cette part de la hauteur,
+#: sinon la page Paramètres n'afficherait plus que deux réglages à la fois.
+TOUCH_HEIGHT_CAP = 0.15
+
+#: La barre de navigation est présente sur l'accueil, qui doit tenir entier
+#: sans défilement : elle reste confortable, mais plus mesurée.
+NAV_HEIGHT_CAP = 0.10
 
 
 @dataclass(frozen=True)
 class Metrics:
-    """Toutes les tailles de l'interface, mises à l'échelle de la dalle."""
+    """Toutes les tailles de l'interface, dérivées de la dalle réelle."""
 
     scale: float
+    #: Pixels par millimètre physique, déduit de la diagonale de l'écran.
+    px_per_mm: float = 8.5
+    height_px: int = BASE_HEIGHT
 
     def px(self, value: float) -> int:
         """Met une dimension de référence à l'échelle, au pixel entier."""
         return max(1, round(value * self.scale))
+
+    def mm(self, millimetres: float) -> int:
+        """Convertit une dimension physique en pixels sur cette dalle."""
+        return max(1, round(millimetres * self.px_per_mm))
 
     # -- typographie ----------------------------------------------------
     @property
@@ -143,17 +168,43 @@ class Metrics:
 
     @property
     def navbar_height(self) -> int:
-        return self.px(52)
+        return self.nav_touch + self.px(12)
 
     @property
     def touch_min(self) -> int:
-        return self.px(38)
+        """Cible tactile des commandes importantes, en pixels réels.
+
+        Utilisée par tous les réglages qu'on manipule au doigt dans un véhicule
+        en mouvement : modes, seuils, commandes manuelles, repli, confirmation.
+        Un défilement vertical dans les Paramètres est préférable à un bouton
+        qu'on rate une fois sur trois.
+        """
+        target = round(MIN_TOUCH_MM * self.px_per_mm)
+        cap = round(self.height_px * TOUCH_HEIGHT_CAP)
+        return max(self.px(34), min(target, cap))
+
+    @property
+    def nav_touch(self) -> int:
+        """Hauteur des entrées de navigation.
+
+        Plus mesurée que ``touch_min`` : la barre est présente sur l'accueil,
+        qui doit rester entièrement visible sans défilement.
+        """
+        cap = round(self.height_px * NAV_HEIGHT_CAP)
+        return max(self.px(34), min(self.touch_min, cap))
 
 
-def metrics_for(width: int, height: int) -> Metrics:
-    """Échelle déduite de la dalle réelle, bornée pour rester lisible."""
-    scale = min(height / BASE_HEIGHT, width / 800.0)
-    return Metrics(scale=max(0.62, min(1.9, scale)))
+def metrics_for(width: int, height: int,
+                diagonal_in: float | None = None) -> Metrics:
+    """Métriques déduites de la dalle : résolution **et** taille physique."""
+    scale = max(0.62, min(1.9, min(height / BASE_HEIGHT, width / 800.0)))
+    diagonal_px = (width ** 2 + height ** 2) ** 0.5
+    diagonal_mm = (diagonal_in or DEFAULT_DIAGONAL_IN) * 25.4
+    return Metrics(
+        scale=scale,
+        px_per_mm=diagonal_px / diagonal_mm,
+        height_px=height,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -201,7 +252,7 @@ QPushButton {{
     border: 1px solid {BORDER_STRONG};
     border-radius: {metrics.radius_small}px;
     padding: {metrics.px(4)}px {metrics.px(10)}px;
-    min-height: {metrics.px(34)}px;
+    min-height: {metrics.touch_min}px;
     font-size: {metrics.font_small}px;
     font-weight: 600;
 }}
@@ -220,16 +271,23 @@ QPushButton[flat="true"] {{
     background: transparent; border: none; min-height: 0px;
 }}
 QPushButton[nav="true"] {{
-    padding: 0px; min-height: {metrics.px(30)}px; font-size: {metrics.font_normal}px;
+    padding: 0px; min-height: {metrics.nav_touch}px;
+    font-size: {metrics.font_normal}px;
+}}
+/* Actions secondaires d'une liste (supprimer un point de calibration) :
+   elles ne méritent pas la même surface que les commandes de conduite. */
+QPushButton[compact="true"] {{
+    padding: {metrics.px(2)}px {metrics.px(8)}px; min-height: {metrics.px(30)}px;
 }}
 
 QScrollArea, QScrollArea > QWidget > QWidget {{ background: transparent; }}
 QScrollBar:vertical {{
-    background: transparent; width: {metrics.px(9)}px; margin: 0;
+    background: {CARD}; width: {metrics.px(14)}px; margin: 0;
+    border-radius: {metrics.px(7)}px;
 }}
 QScrollBar::handle:vertical {{
-    background: {BORDER_STRONG}; border-radius: {metrics.px(4)}px;
-    min-height: {metrics.px(30)}px;
+    background: {TEXT_DIM}; border-radius: {metrics.px(6)}px;
+    min-height: {metrics.px(44)}px; margin: {metrics.px(1)}px;
 }}
 QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; }}
 QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}

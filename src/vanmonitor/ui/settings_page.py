@@ -11,6 +11,7 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QPushButton,
     QScrollArea,
+    QScroller,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -69,7 +70,7 @@ class SettingsPage(QWidget):
             button = QPushButton(text)
             button.setCheckable(True)
             button.setProperty("nav", "true")
-            button.setFixedHeight(metrics.px(38))
+            button.setFixedHeight(metrics.nav_touch)
             button.clicked.connect(lambda _checked, key=key: self.show_section(key))
             rail_layout.addWidget(button)
             self._buttons[key] = button
@@ -95,6 +96,14 @@ class SettingsPage(QWidget):
             scroll.setFrameShape(QScrollArea.NoFrame)
             # Jamais de défilement horizontal : tout doit tenir en largeur.
             scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            # Les commandes étant dimensionnées pour le doigt, une section ne
+            # tient plus toujours d'un seul écran. La barre reste donc visible
+            # en permanence : mieux vaut savoir qu'il y a une suite que de
+            # croire la page tronquée.
+            scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+            # Et l'on fait défiler en tirant la page, pas en visant la barre.
+            QScroller.grabGesture(scroll.viewport(),
+                                  QScroller.LeftMouseButtonGesture)
             self._scrolls[key] = scroll
             self._stack.addWidget(scroll)
         layout.addWidget(self._stack, 1)

@@ -140,25 +140,48 @@ def _status(circuit: CircuitId, *, state: ValveState, certain: bool,
     )
 
 
-def test_confirmed_state_is_solid_and_green() -> None:
-    status = _status(CircuitId.LOCAL_EAU, state=ValveState.OUVERT,
-                     certain=True, feedback=True)
-    colour, filled, crossed, text = _valve_appearance(status)
-    assert filled is True        # corps plein = confirmé
-    assert crossed is False
-    assert text == "OUVERTE"
+def test_ouverte_and_fermee_are_reserved_to_confirmed_positions() -> None:
+    """« OUVERTE » et « FERMÉE » décrivent une position, jamais une commande."""
+    opened = _valve_appearance(_status(CircuitId.LOCAL_EAU, state=ValveState.OUVERT,
+                                       certain=True, feedback=True))
+    assert opened[3] == "OUVERTE"
+    assert opened[1] is True                # corps plein = confirmé
+
+    closed = _valve_appearance(_status(CircuitId.LOCAL_EAU, state=ValveState.FERME,
+                                       certain=True, feedback=True,
+                                       commanded=ValveCommand.CLOSE))
+    assert closed[3] == "FERMÉE"
+    assert closed[1] is True
 
 
-def test_commanded_only_state_is_hollow_and_orange() -> None:
-    """Le point de vigilance : sans confirmation, la forme change aussi."""
-    status = _status(CircuitId.CABINE, state=ValveState.OUVERT,
-                     certain=False, feedback=False)
-    colour, filled, crossed, _text = _valve_appearance(status)
-    assert filled is False       # corps évidé = seulement commandé
-    assert colour != "#3ED860"   # et jamais la couleur d'un état confirmé
+def test_without_feedback_the_wording_names_the_command_not_a_position() -> None:
+    """Sans retour de position, on n'annonce jamais qu'une vanne *est* ouverte."""
+    for commanded, expected in (
+        (ValveCommand.OPEN, "OUVERTURE COMMANDÉE"),
+        (ValveCommand.CLOSE, "FERMETURE COMMANDÉE"),
+    ):
+        state = (ValveState.OUVERT if commanded is ValveCommand.OPEN
+                 else ValveState.FERME)
+        colour, filled, _crossed, text = _valve_appearance(
+            _status(CircuitId.CABINE, state=state, certain=False,
+                    feedback=False, commanded=commanded)
+        )
+        assert text == expected
+        assert filled is False              # corps évidé = seulement commandé
+        assert colour != "#3ED860"          # jamais la couleur d'un état confirmé
+        assert "OUVERTE" not in text and "FERMÉE" not in text
 
 
-def test_home_writes_commande_in_full(window) -> None:
+def test_no_command_yet_reads_unknown() -> None:
+    colour, filled, _crossed, text = _valve_appearance(
+        _status(CircuitId.CABINE, state=ValveState.INCONNU, certain=False,
+                feedback=False, commanded=ValveCommand.NONE)
+    )
+    assert text == "INCONNU"
+    assert filled is False
+
+
+def test_home_shows_the_commanded_wording(window) -> None:
     widget, application = window
     application.hal.sim_state.set_valve_feedback(CircuitId.CABINE, False)
     application.hal.sim_state.set_valve_travel_time(CircuitId.CABINE, 0.0)
@@ -170,15 +193,20 @@ def test_home_writes_commande_in_full(window) -> None:
 
     import time
     deadline = time.monotonic() + 3.0
+    texts: list[str] = []
     while time.monotonic() < deadline:
         application.control.tick()
         widget.refresh()
-        if "commandé" in _texts(widget):
+        texts = _texts(widget._home)
+        if "OUVERTURE COMMANDÉE" in texts:
             break
         time.sleep(0.05)
 
-    assert "commandé" in _texts(widget), (
-        "un état non confirmé doit être annoncé en toutes lettres"
+    assert "OUVERTURE COMMANDÉE" in texts, (
+        "un état non confirmé doit être annoncé comme une commande"
+    )
+    assert "OUVERTE" not in texts, (
+        "aucune vanne n'est confirmée ouverte dans cette configuration"
     )
 
 
@@ -227,6 +255,27 @@ def test_missing_autonomy_hides_the_line_rather_than_showing_na(window) -> None:
     )
     widget._home._battery.update_reading(reading)
     assert widget._home._battery._autonomy.isVisible() is False
+
+
+def test_a_stale_battery_never_leaves_an_old_autonomy_on_screen(window) -> None:
+    """Après coupure, l'écran dit que le shunt ne répond plus — et rien d'autre."""
+    widget, _application = window
+    card = widget._home._battery
+
+    card.update_reading(BatteryReading(
+        soc_percent=87.0, voltage_v=13.2, current_a=-4.2, power_w=-55.0,
+        consumed_ah=-12.0, time_to_go_min=1080, status=Status.OK, updated_at=0.0,
+    ))
+    assert "Autonomie : 18 h 00" in _texts(card)
+
+    card.update_reading(BatteryReading(status=Status.STALE,
+                                       reason="aucune lecture depuis 300 s"))
+    texts = _texts(card)
+    assert not any(text.startswith("Autonomie") for text in texts), (
+        "aucune autonomie mémorisée ne doit rester affichée"
+    )
+    assert "SmartShunt non joignable" in texts
+    assert "--" in texts
 
 
 # ---------------------------------------------------------------------------

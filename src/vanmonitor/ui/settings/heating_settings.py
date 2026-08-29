@@ -146,9 +146,9 @@ class CircuitSettings(Card):
         self._close_button.setEnabled(manual)
 
     def update_status(self, status: CircuitStatus) -> None:
+        # Le libellé porte déjà la distinction commandé / confirmé : il n'y a
+        # rien à lui ajouter.
         colour, _filled, _crossed, text = _valve_appearance(status)
-        if not status.state_is_certain and status.commanded is not ValveCommand.NONE:
-            text = f"{text}  (commandé)"
         self._state.setText(text)
         recolor(self._state, colour)
 

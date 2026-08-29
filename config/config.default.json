@@ -3,7 +3,8 @@
   "general": {
     "simulation": false,
     "fullscreen": true,
-    "ui_refresh_hz": 2
+    "ui_refresh_hz": 2,
+    "screen_diagonal_in": 4.3
   },
   "workers": {
     "watchdog_factor": 3,

@@ -28,6 +28,10 @@ DEFAULTS: dict[str, Any] = {
         "simulation": False,
         "fullscreen": True,
         "ui_refresh_hz": 2,
+        # Diagonale physique de la dalle, en pouces. Sert à dimensionner
+        # les cibles tactiles en millimètres réels et non en pixels.
+        # MATERIEL À INTEGRER PLUS TARD : écran non choisi (H-6).
+        "screen_diagonal_in": 4.3,
     },
 
     "workers": {

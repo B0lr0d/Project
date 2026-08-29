@@ -11,10 +11,10 @@ from PyQt5.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QVBoxLayout, QWidg
 
 from ...constants import (
     CircuitId,
-    ConfirmedState,
     HeatingMode,
     Status,
     TankId,
+    ValveCommand,
     ValveState,
     ZONE_ORDER,
     ZoneId,
@@ -97,8 +97,10 @@ class BatteryCard(Card):
             self._icon.set_state(None, theme.TEXT_DIM)
             for widget in (self._voltage, self._current, self._power, self._consumed):
                 widget.setText(NO_VALUE)
+            # Le SmartShunt est au bout d'une liaison, pas d'un capteur : c'est
+            # la liaison qu'il faut nommer quand elle tombe.
             self._autonomy.setText(
-                "Erreur capteur" if reading.status is Status.FAULT
+                "Liaison non intégrée" if reading.status is Status.ABSENT
                 else "SmartShunt non joignable"
             )
             recolor(self._autonomy, theme.RED)
@@ -285,6 +287,8 @@ class CircuitTile(Card):
         self._indicator = ValveIndicator(metrics)
         self._state = label(NO_VALUE, size=metrics.font_small, color=theme.TEXT_DIM,
                             bold=True, align=Qt.AlignHCenter | Qt.AlignVCenter)
+        # « OUVERTURE COMMANDÉE » passe sur deux lignes plutôt que d'être rogné.
+        self._state.setWordWrap(True)
         self._note = label("", size=metrics.font_tiny, color=theme.ORANGE,
                            align=Qt.AlignHCenter | Qt.AlignVCenter)
         self._thresholds = label("", size=metrics.font_tiny, color=theme.TEXT_DIM,
@@ -319,14 +323,14 @@ class CircuitTile(Card):
         if status.fault:
             self._note.setText(status.fault_reason or "défaut")
             recolor(self._note, theme.RED)
-        elif not status.state_is_certain and status.commanded.value != "none":
-            # Le mot est écrit en toutes lettres : aucune couleur seule.
-            self._note.setText("commandé")
-            recolor(self._note, theme.ORANGE)
-        elif not status.feedback_available:
-            self._note.setText("sans retour")
+        elif not status.feedback_available and status.commanded is ValveCommand.NONE:
+            # Aucun ordre encore passé et aucun retour : il faut le dire, l'état
+            # affiché ne porte pas encore l'information.
+            self._note.setText("sans retour de position")
             recolor(self._note, theme.TEXT_DIM)
         else:
+            # Dans tous les autres cas, le libellé d'état dit lui-même s'il
+            # s'agit d'une position confirmée ou d'une simple commande.
             self._note.setText("")
 
         if status.thresholds_defined:
@@ -339,32 +343,44 @@ class CircuitTile(Card):
 
 
 def _valve_appearance(status: CircuitStatus) -> tuple[str, bool, bool, str]:
-    """Couleur, disque plein ou anneau, croix, libellé — pour un état de clapet.
+    """Couleur, corps plein ou évidé, croix, libellé — pour un état de clapet.
 
-    La forme est le premier signal : **plein = confirmé par le matériel**,
-    **anneau = seulement commandé**. La couleur ne fait que renforcer.
+    Le vocabulaire est strictement séparé, et c'est le point le plus important
+    de cet écran :
+
+    * ``OUVERTE`` et ``FERMÉE`` décrivent une **position physique confirmée**
+      par un retour de position réel. Ces deux mots ne sont jamais employés
+      autrement ;
+    * ``OUVERTURE COMMANDÉE`` et ``FERMETURE COMMANDÉE`` décrivent un **ordre
+      transmis** dont le matériel n'a rien confirmé. C'est le cas de tout
+      actionneur sans retour de position ;
+    * ``OUVERTURE`` et ``FERMETURE`` décrivent une course en cours, constatée.
+
+    La forme renforce la distinction : corps de vanne plein pour une position
+    confirmée, évidé sinon.
     """
     if status.fault or status.display_state is ValveState.ERREUR:
         return theme.RED, False, True, "DÉFAUT"
 
-    words = {
-        ValveState.OUVERT: "OUVERTE",
-        ValveState.FERME: "FERMÉE",
-        ValveState.OUVERTURE: "OUVERTURE",
-        ValveState.FERMETURE: "FERMETURE",
-        ValveState.INCONNU: "INCONNU",
-    }
-    text = words.get(status.display_state, "INCONNU")
-
-    if status.display_state in (ValveState.OUVERTURE, ValveState.FERMETURE):
-        return theme.AMBER, False, False, text
+    if status.display_state is ValveState.OUVERTURE:
+        return theme.AMBER, False, False, "OUVERTURE"
+    if status.display_state is ValveState.FERMETURE:
+        return theme.AMBER, False, False, "FERMETURE"
     if status.display_state is ValveState.INCONNU:
-        return theme.TEXT_DIM, False, False, text
+        return theme.TEXT_DIM, False, False, "INCONNU"
 
-    certain = status.state_is_certain
-    if status.display_state is ValveState.OUVERT:
-        return (theme.GREEN if certain else theme.ORANGE), certain, False, text
-    return (theme.TEXT_MUTED if certain else theme.ORANGE), certain, False, text
+    if status.state_is_certain:
+        # Position réellement confirmée : seul cas où l'on emploie OUVERTE/FERMÉE.
+        if status.display_state is ValveState.OUVERT:
+            return theme.GREEN, True, False, "OUVERTE"
+        return theme.TEXT_MUTED, True, False, "FERMÉE"
+
+    # Rien de confirmé : on ne parle plus que de la commande transmise.
+    if status.commanded is ValveCommand.OPEN:
+        return theme.ORANGE, False, False, "OUVERTURE COMMANDÉE"
+    if status.commanded is ValveCommand.CLOSE:
+        return theme.ORANGE, False, False, "FERMETURE COMMANDÉE"
+    return theme.TEXT_DIM, False, False, "INCONNU"
 
 
 class HeatingCard(Card):

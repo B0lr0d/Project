@@ -164,7 +164,7 @@ class NavBar(QFrame):
             button = QPushButton(text)
             button.setCheckable(True)
             button.setProperty("nav", "true")
-            button.setFixedHeight(metrics.px(36))
+            button.setFixedHeight(metrics.nav_touch)
             button.setFixedWidth(metrics.px(190))
             button.clicked.connect(lambda _checked, key=key: self.navigate.emit(key))
             layout.addWidget(button)
