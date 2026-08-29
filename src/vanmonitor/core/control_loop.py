@@ -100,6 +100,8 @@ class ControlWorker(threading.Thread):
             battery=snapshot.battery,
             circuits=snapshot.circuits,
             alerts=alerts,
+            available_sensor_ids=snapshot.available_sensor_ids,
+            sensor_temperatures=snapshot.sensor_temperatures,
             simulation=snapshot.simulation,
         )
 

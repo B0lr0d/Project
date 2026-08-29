@@ -56,6 +56,9 @@ class MainWindow(QWidget):
             application.config, builder.heating, builder.tanks,
             application.command_bus, application.sensor_ids,
             metrics, self._profile, application.implicit_bindings,
+            # Lire les sondes non associées coûte cher sur un bus 1-Wire :
+            # on ne le fait que pendant que la page Sondes est ouverte.
+            application.acquisition.set_identification_mode,
         )
 
         self._stack = QStackedWidget()

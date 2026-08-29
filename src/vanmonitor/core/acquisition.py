@@ -15,10 +15,19 @@ le mécanisme générique des threads avec la description de l'installation.)
 
 from __future__ import annotations
 
+import threading
 from typing import Callable
 
 from ..config import ConfigStore
-from ..constants import CIRCUIT_ORDER, CircuitId, TANK_ORDER, TankId, ZONE_ORDER, ZoneId
+from ..constants import (
+    CIRCUIT_ORDER,
+    CircuitId,
+    Status,
+    TANK_ORDER,
+    TankId,
+    ZONE_ORDER,
+    ZoneId,
+)
 from ..hal.factory import HalBundle
 from ..hal.interfaces import HardwareError
 from ..models import AcquisitionSnapshot, Sample, WorkerHealth
@@ -26,6 +35,7 @@ from ..util.logging_setup import get_logger
 from ..util.ratelimit import RateLimitedLogger
 from ..util.timebase import monotonic
 from .commands import CommandBus
+from .filters import SpikeGuard
 from .state import LatestValue
 from .workers import HardwareWorker, ValveWorker, WorkerSupervisor
 
@@ -65,7 +75,19 @@ class AcquisitionService:
         self._battery_backoff_index = 0
         self._started = False
 
+        # --- températures : bus vivant, filtrage, identification ---------
+        max_step = float(config.get("temperatures.max_step_c", 12.0))
+        self._temperature_guards = {zone: SpikeGuard(max_step) for zone in ZONE_ORDER}
+        self._available_sensor_ids: tuple[str, ...] = ()
+        self._sensor_temperatures: dict[str, Sample] = {}
+        #: Lecture des sondes détectées mais non associées. Coûteuse sur un bus
+        #: 1-Wire, donc réservée au moment où l'on cherche à identifier une
+        #: sonde — c'est-à-dire quand la section Sondes est ouverte.
+        self._identification = False
+        self._rebind_lock = threading.Lock()
+
         self._mark_unconfigured_equipment()
+        config.add_listener(self._on_config_changed)
 
     # ------------------------------------------------------------------
     # Cycle de vie
@@ -160,8 +182,53 @@ class AcquisitionService:
             },
             workers=tuple(worker_health if worker_health is not None
                           else self._supervisor.health(now)),
+            available_sensor_ids=self._available_sensor_ids,
+            sensor_temperatures=dict(self._sensor_temperatures),
             simulation=self._hal.simulation,
         )
+
+    # ------------------------------------------------------------------
+    # Bus 1-Wire : association à chaud et identification
+    # ------------------------------------------------------------------
+    def set_identification_mode(self, enabled: bool) -> None:
+        """Active la lecture des sondes non associées.
+
+        Activé seulement quand la section Sondes est ouverte : sur un bus
+        1-Wire, chaque sonde lue en plus coûte près d'une seconde par cycle.
+        """
+        self._identification = bool(enabled)
+        if not enabled:
+            self._sensor_temperatures = {}
+
+    def _on_config_changed(self, path: str) -> None:
+        """Réassocie une sonde dès que l'utilisateur change son affectation.
+
+        Sans cela, un changement d'association ne prendrait effet qu'au
+        prochain démarrage — ce qui rendrait la page Sondes trompeuse.
+        """
+        if not path.startswith("temperatures.zones."):
+            return
+        parts = path.split(".")
+        if len(parts) < 4 or parts[3] != "sensor_id":
+            return
+        try:
+            zone = ZoneId(parts[2])
+        except ValueError:
+            return
+
+        with self._rebind_lock:
+            sensor = self._hal.rebuild_temperature_sensor(self._config, zone)
+            self._temperature_guards[zone].reset()
+            slot = self._temperature_slots[zone]
+            # La valeur de l'ancienne sonde n'a plus rien à voir avec la zone :
+            # on l'écarte, et on refuse toute lecture entamée avant ce point.
+            slot.mark_absent(
+                "sonde non associée" if sensor is None else "réassociation en cours",
+                monotonic(),
+            )
+        logger.info("zone %s : sonde réassociée (%s)", zone.value,
+                    self._config.get(f"temperatures.zones.{zone.value}.sensor_id")
+                    or "aucune")
 
     def raw_level(self, tank: TankId) -> float | None:
         """Dernière valeur brute d'un réservoir (utilisée par la calibration)."""
@@ -186,40 +253,122 @@ class AcquisitionService:
                 self._valve_slots[circuit].mark_absent("actionneur non intégré")
 
     def _task_temperatures(self) -> None:
-        """Lit les cinq sondes, une par une, sans qu'une panne en cache une autre."""
+        """Un tour complet du bus 1-Wire.
+
+        Trois choses, dans cet ordre : recenser les sondes réellement présentes,
+        lire celle de chaque zone associée, et — seulement si l'on cherche à
+        identifier une sonde — lire aussi celles qui ne sont associées à rien.
+
+        Aucune panne n'en cache une autre : chaque sonde est lue dans son propre
+        ``try``, et une sonde muette n'empêche pas les quatre autres de
+        répondre.
+        """
+        self._available_sensor_ids = tuple(self._hal.scan_temperature_sensor_ids())
+        readings: dict[str, Sample] = {}
+
         low, high = self._config.get("temperatures.valid_range_c", [-40.0, 85.0])
         for zone in ZONE_ORDER:
             sensor = self._hal.temperature_sensors.get(zone)
-            slot = self._temperature_slots[zone]
             if sensor is None:
-                continue        # déjà marquée absente au démarrage
-            key = f"temp.{zone.value}"
-            # Instant du début de la mesure : c'est lui qui date la valeur, et
-            # qui permet d'écarter la publication d'un thread abandonné.
-            started = monotonic()
-            if not sensor.is_present():
-                # Sonde disparue du bus : état normal (`--`), pas une panne.
-                slot.mark_absent("sonde non détectée sur le bus", started)
-                limited.warning(key, f"sonde {zone.value} non détectée sur le bus")
+                continue        # zone non associée : déjà marquée absente
+            sample = self._read_zone(zone, sensor, float(low), float(high))
+            if sample is not None and sensor is not None:
+                try:
+                    readings[sensor.sensor_id()] = sample
+                except Exception:       # un pilote qui refuse de se nommer
+                    pass
+
+        if self._identification:
+            readings.update(self._read_unbound_sensors(float(low), float(high)))
+
+        self._sensor_temperatures = readings
+
+    def _read_zone(self, zone: ZoneId, sensor, low: float, high: float) -> Sample | None:
+        """Lit une zone et publie le résultat. Rend l'échantillon obtenu."""
+        slot = self._temperature_slots[zone]
+        key = f"temp.{zone.value}"
+        guard = self._temperature_guards[zone]
+
+        # Instant du début de la mesure : c'est lui qui date la valeur, et qui
+        # permet d'écarter la publication d'un thread abandonné.
+        started = monotonic()
+
+        if not sensor.is_present():
+            # Sonde disparue du bus : état normal (`--`), pas une panne.
+            guard.reset()
+            slot.mark_absent("sonde non détectée sur le bus", started)
+            limited.warning(key, f"sonde {zone.value} non détectée sur le bus")
+            return slot.get(started)
+
+        try:
+            celsius = sensor.read_celsius()
+        except HardwareError as exc:
+            guard.reset()
+            slot.mark_fault(str(exc), started)
+            limited.warning(key, f"température {zone.value} : {exc}")
+            return slot.get(started)
+        except Exception as exc:
+            guard.reset()
+            slot.mark_fault(f"{type(exc).__name__}: {exc}", started)
+            limited.error(key, f"température {zone.value} : erreur inattendue ({exc})")
+            return slot.get(started)
+
+        if not (low <= celsius <= high):
+            guard.reset()
+            slot.mark_fault(f"valeur hors plage ({celsius:.1f} °C)", started)
+            limited.warning(key, f"température {zone.value} hors plage : {celsius:.1f} °C")
+            return slot.get(started)
+
+        accepted, reason = guard.accept(celsius)
+        if not accepted:
+            # Valeur isolée invraisemblable : on garde la précédente et on
+            # attend confirmation. Le statut ne change pas — ce n'est pas une
+            # panne, c'est une trame douteuse.
+            limited.warning(f"{key}.spike", f"température {zone.value} : {reason}")
+            return slot.get(started)
+
+        slot.set(celsius, started)
+        limited.clear(key)
+        limited.clear(f"{key}.spike")
+        return slot.get(started)
+
+    def _read_unbound_sensors(self, low: float, high: float) -> dict[str, Sample]:
+        """Lit les sondes détectées mais associées à aucune zone.
+
+        C'est ce qui permet d'identifier physiquement une sonde avant de
+        l'associer : on la réchauffe à la main et on regarde quelle ligne monte.
+        Réservé au mode identification, car chaque lecture supplémentaire
+        occupe le bus une seconde de plus.
+        """
+        bound: set[str] = set()
+        for sensor in self._hal.temperature_sensors.values():
+            if sensor is None:
                 continue
             try:
+                bound.add(sensor.sensor_id())
+            except Exception:
+                continue
+
+        readings: dict[str, Sample] = {}
+        for sensor_id in self._available_sensor_ids:
+            if sensor_id in bound:
+                continue
+            sensor = self._hal.sensor_for_id(self._config, sensor_id)
+            if sensor is None:
+                continue
+            started = monotonic()
+            try:
                 celsius = sensor.read_celsius()
-            except HardwareError as exc:
-                slot.mark_fault(str(exc), started)
-                limited.warning(key, f"température {zone.value} : {exc}")
-                continue
             except Exception as exc:
-                slot.mark_fault(f"{type(exc).__name__}: {exc}", started)
-                limited.error(key, f"température {zone.value} : erreur inattendue ({exc})")
+                readings[sensor_id] = Sample(None, Status.FAULT, None, None, str(exc))
                 continue
-
-            if not (float(low) <= celsius <= float(high)):
-                slot.mark_fault(f"valeur hors plage ({celsius:.1f} °C)", started)
-                limited.warning(key, f"température {zone.value} hors plage : {celsius:.1f} °C")
-                continue
-
-            slot.set(celsius, started)
-            limited.clear(key)
+            status = Status.OK if low <= celsius <= high else Status.FAULT
+            readings[sensor_id] = Sample(
+                celsius if status is Status.OK else None,
+                status, started, 0.0,
+                None if status is Status.OK else "valeur hors plage",
+            )
+        return readings
 
     def _task_levels(self) -> None:
         for tank in TANK_ORDER:

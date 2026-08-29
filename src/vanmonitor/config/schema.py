@@ -171,6 +171,8 @@ def validate(raw: Any) -> tuple[dict[str, Any], list[str]]:
                   minimum=0.1, maximum=60)
     _check_number(temps, "stale_after_s", temps_defaults, warnings, "temperatures",
                   minimum=1, maximum=86400)
+    _check_number(temps, "max_step_c", temps_defaults, warnings, "temperatures",
+                  minimum=0.0, maximum=200.0)
 
     valid_range = temps.get("valid_range_c")
     if (not isinstance(valid_range, list) or len(valid_range) != 2

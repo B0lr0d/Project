@@ -12,6 +12,9 @@ tout élément matériel non confirmé est marqué **MATERIEL À INTEGRER PLUS T
 et n'existe côté logiciel que sous forme d'interface abstraite.
 
 > **Journal des révisions**
+> **Rév. 7** — étape 4 livrée : pilote DS18B20 réel, balayage du bus 1-Wire,
+> filtrage des trames aberrantes, association et identification des sondes à
+> chaud (§13). Vocabulaire des clapets aligné dans tout le document.
 > **Rév. 6** — trois corrections après relecture de l'étape 3 : vocabulaire des
 > clapets sans retour de position, cibles tactiles dimensionnées en
 > millimètres réels, vérification de l'autonomie SmartShunt (§13).
@@ -279,7 +282,7 @@ Project/
 │   │   │   ├── tile.py                # tuile de mesure (grand chiffre + unité)
 │   │   │   ├── bar_gauge.py           # jauge horizontale
 │   │   │   ├── temperature_list.py
-│   │   │   ├── circuit_row.py         # ligne chauffage : commandé vs confirmé
+│   │   │   ├── circuit_row.py         # ligne chauffage : ordre commandé vs position confirmée
 │   │   │   ├── alert_bar.py
 │   │   │   ├── numeric_keypad.py      # pavé numérique tactile
 │   │   │   └── touch_controls.py      # boutons/bascules dimensionnés en millimètres
@@ -416,7 +419,7 @@ class CircuitStatus:
     confirmed: ConfirmedState      # INCONNU si le matériel ne renvoie pas de position
     feedback_available: bool       # le pilote fournit-il un retour de position ?
     display_state: ValveState      # état à afficher, dérivé des trois champs ci-dessus
-    state_is_certain: bool         # False → l'UI doit écrire « commandé », jamais un état sec
+    state_is_certain: bool         # False → l'UI nomme l'ordre, jamais une position
     commanded_since: float
     transition_deadline: float | None
 
@@ -864,8 +867,9 @@ Appui « OUVRIR » sur Cabine (UI, thread Qt)
 ```
 
 L'UI **n'affiche jamais un état qu'elle a supposé**. Elle affiche l'état
-construit par le thread de contrôle, avec la mention « commandé » tant qu'aucun
-retour de position ne le confirme (§7.4).
+construit par le thread de contrôle. Tant qu'aucun retour de position ne
+confirme la position, il nomme l'ordre transmis (`OUVERTURE COMMANDÉE`) et non
+une position (§7.4).
 
 ### 6.4 Chemin d'un changement de réglage
 
@@ -931,8 +935,9 @@ dans cette gamme, **à titre de représentation et non de spécification**.
 ├───────────────────┴──────────┬────────┴──────────────┴───────────────────┤
 │ TEMPÉRATURES                 │ CHAUFFAGE                                 │
 │                              │                                           │
-│ Local batterie      12,4 °C  │ Local eau       AUTO   ◉ OUVERT commandé  │
-│ Local eau            6,1 °C  │ Local batterie  MANU   ○ FERMÉ commandé   │
+│ Local batterie      12,4 °C  │ Local eau       AUTO   ● OUVERTE          │
+│ Local eau            6,1 °C  │ Local batterie  MANU   ○ FERMETURE         │
+│                              │                          COMMANDÉE        │
 │ Coffre               9,8 °C  │ Cabine          MANU   ◐ OUVERTURE        │
 │ Cabine              18,2 °C  │                                           │
 │ Cellule                  --  │                                           │
@@ -981,9 +986,9 @@ certain sans retour de position réel.
 
 | Situation | Affichage | Certitude |
 |---|---|---|
-| Retour de position disponible, position lue | `● OUVERT` / `○ FERMÉ` — pastille pleine, texte franc | état **confirmé** |
-| Pas de retour de position, ordre d'ouverture passé | `◉ OUVERT commandé` — pastille en anneau, suffixe gris | état **commandé** |
-| Pas de retour de position, ordre de fermeture passé | `○ FERMÉ commandé` | état **commandé** |
+| Retour de position disponible, position lue | `● OUVERTE` / `○ FERMÉE` — corps de vanne plein | état **confirmé** |
+| Pas de retour de position, ordre d'ouverture passé | `◉ OUVERTURE COMMANDÉE` — corps évidé, orange | état **commandé** |
+| Pas de retour de position, ordre de fermeture passé | `◉ FERMETURE COMMANDÉE` — corps évidé, orange | état **commandé** |
 | Ordre en cours, dans le délai de transition | `◐ OUVERTURE` / `◑ FERMETURE` | transitoire |
 | Retour de position attendu mais non obtenu à l'échéance | `✕ ERREUR` + alerte technique | défaut |
 | Retour de position contredisant l'ordre | `✕ ERREUR` + alerte technique | défaut |
@@ -991,11 +996,13 @@ certain sans retour de position réel.
 
 Règles associées :
 
-* `state_is_certain = feedback_available and confirmed != INCONNU`. Le widget
-  `circuit_row` s'appuie uniquement sur ce champ pour décider s'il ajoute le mot
-  « commandé » ; il ne fait aucune supposition de son côté.
-* Le mot « commandé » est écrit en toutes lettres, en gris, à côté de l'état :
-  aucun code de couleur seul, aucune icône seule.
+* `state_is_certain = feedback_available and confirmed != INCONNU`. C'est ce
+  champ, et lui seul, qui autorise le vocabulaire `OUVERTE` / `FERMÉE` ; le
+  widget ne fait aucune supposition de son côté.
+* **`OUVERTE` et `FERMÉE` décrivent une position physiquement confirmée, et
+  rien d'autre.** Sans confirmation, l'écran nomme l'ordre transmis :
+  `OUVERTURE COMMANDÉE` / `FERMETURE COMMANDÉE`. Le mot est écrit en toutes
+  lettres : aucun code de couleur seul, aucune icône seule.
 * Un `MockValveDriver` doit exister **dans les deux variantes** (avec et sans
   retour de position) pour que le cas « sans retour » soit testé dès l'étape 2.
 * Le repli sur perte de sonde affiche en plus la mention `REPLI` sur la ligne du
@@ -1015,14 +1022,14 @@ Deux niveaux seulement : rail de sections à gauche, contenu à droite.
 │ ALERTES      │                                                           │
 │ CALIBRATION  │  Local eau                            [ AUTO ] [ MANUEL ] │
 │ SONDES       │    Ouverture   [   5,0 °C  ]   Fermeture  [   8,0 °C  ]   │
-│ HISTORIQUE   │    État : OUVERT (commandé)   [ OUVRIR ]  [ FERMER ]      │
+│ HISTORIQUE   │    État : OUVERTURE COMMANDÉE  [ OUVRIR ] [ FERMER ]      │
 │              │    Repli si sonde perdue  ⚠                               │
 │              │      [ OUVRIR ] [ FERMER ] [ MAINTENIR ]                  │
 │              │  ───────────────────────────────────────────────────────  │
 │              │  Local batterie                       [ AUTO ] [ MANUEL ] │
 │              │    Ouverture   [    --     ]   Fermeture  [    --     ]   │
 │              │    ⚠ Seuils à définir — mode AUTO indisponible            │
-│              │    État : FERMÉ (commandé)    [ OUVRIR ]  [ FERMER ]      │
+│              │    État : FERMETURE COMMANDÉE  [ OUVRIR ] [ FERMER ]      │
 │              │    Repli si sonde perdue  ⚠                               │
 │              │      [ OUVRIR ] [ FERMER ] [ MAINTENIR ]                  │
 └──────────────┴───────────────────────────────────────────────────────────┘
@@ -1042,7 +1049,8 @@ Règles communes :
 ### Section CHAUFFAGE
 Trois blocs nommés `Local eau`, `Local batterie`, `Cabine`. Pour chacun :
 bascule AUTO/MANUEL, seuil d'ouverture, seuil de fermeture, état courant avec la
-mention « commandé » quand il n'est pas confirmé, boutons `OUVRIR` / `FERMER`
+état courant — `OUVERTE` / `FERMÉE` seulement s'il est confirmé, sinon
+`OUVERTURE COMMANDÉE` / `FERMETURE COMMANDÉE` —, boutons `OUVRIR` / `FERMER`
 grisés en mode AUTO, et le **repli sur perte de sonde**.
 Contraintes : `fermeture ≥ ouverture + 1 °C` ; le bouton `AUTO` est désactivé
 tant que les deux seuils ne sont pas définis, avec le message
@@ -1236,7 +1244,7 @@ ajoutés plus tard sans remise en cause de l'architecture.
 | **R-05** | **Liaison VE.Direct filaire** : port série qui change de nom, câble ou interface USB débranchée, trames tronquées | valeurs batterie manquantes | nom de port stable par règle udev ; délai d'expiration en lecture ; trames incomplètes ou incohérentes rejetées ; reconnexion à intervalle croissant plafonné ; statut `STALE` puis alerte technique, jamais de boucle de reconnexion permanente |
 | **R-06** | **Autonomie restante peu fiable** (valeur extrême, absente) | affichage trompeur | affichée seulement si présente et plausible, sinon la ligne disparaît |
 | **R-07** | **Perte d'une sonde utilisée par le chauffage** | risque de gel ou de surchauffe | **résolu (rév. 2)** : repli configuré **par circuit** — Local eau : ouverture ; Local batterie : ouverture ; Cabine : maintien du dernier état. Alerte technique dans les trois cas, mention `REPLI` sur la ligne du circuit |
-| **R-08** | **Absence de retour de position sur les clapets** (matériel non choisi) | un état affiché comme certain alors qu'il ne l'est pas | **traité en profondeur (rév. 2)** : séparation `commanded` / `confirmed` / `state_is_certain` ; un pilote sans retour renvoie toujours `INCONNU` en confirmé ; l'écran écrit « commandé » en toutes lettres ; interdiction explicite de déduire un état confirmé d'un ordre |
+| **R-08** | **Absence de retour de position sur les clapets** (matériel non choisi) | un état affiché comme certain alors qu'il ne l'est pas | **traité en profondeur (rév. 2)** : séparation `commanded` / `confirmed` / `state_is_certain` ; un pilote sans retour renvoie toujours `INCONNU` en confirmé ; `OUVERTE`/`FERMÉE` sont réservés aux positions confirmées, sinon l'écran écrit `OUVERTURE COMMANDÉE`/`FERMETURE COMMANDÉE` ; interdiction explicite de déduire un état confirmé d'un ordre |
 | **R-09** | **Cyclage rapide des clapets** autour d'un seuil | usure mécanique, consommation | hystérésis réelle (deux seuils) **et** durée minimale de maintien d'état (120 s), contrainte `fermeture ≥ ouverture + 1 °C` |
 | **R-10** | **Ballottement du carburant et de l'eau en roulant** | valeurs qui sautent | filtre médian glissant puis moyenne exponentielle ; affichage arrondi |
 | **R-11** | **Calibration incohérente saisie par l'utilisateur** | conversion aberrante | validation stricte, message explicite, conservation de la table précédente |
@@ -1347,8 +1355,9 @@ alertes (8), historique (9). Les modules `hal/real/` existent et lèvent
 #### Points d'attention retenus dans l'interface
 
 * un état de clapet non confirmé se distingue **par la forme** (corps de vanne
-  évidé) autant que par la couleur, et porte le mot « commandé » en toutes
-  lettres — un œil qui distingue mal les teintes doit pouvoir trancher ;
+  évidé) autant que par la couleur, et nomme l'ordre plutôt qu'une position
+  (`OUVERTURE COMMANDÉE`) — un œil qui distingue mal les teintes doit pouvoir
+  trancher ;
 * une sonde débranchée affiche `--`, une sonde en défaut affiche
   `Erreur capteur` : ce sont deux situations différentes ;
 * l'autonomie disparaît quand le SmartShunt ne la fournit pas, plutôt que
@@ -1425,3 +1434,85 @@ Le SmartShunt simulé la **recalcule** maintenant à partir de la charge restant
 et du courant, comme le ferait le matériel : le même cas affiche désormais
 2 h 20. Il rend « aucune autonomie » en charge ou à courant nul, ce qu'un vrai
 shunt annonce comme infini.
+
+### Étape 4 — gestion des températures (livrée)
+
+L'interface validée n'a pas bougé, et le mode simulation reste entier. Ce qui
+change est dessous.
+
+#### Pilote DS18B20 réel
+
+`hal/real/ds18b20.py` n'est plus une souche. Le modèle de sonde étant confirmé,
+son interface avec le noyau l'est aussi : le module `w1-therm` expose chaque
+sonde dans `/sys/bus/w1/devices/<id>/`. **MATERIEL À INTEGRER PLUS TARD reste
+vrai pour le câblage seul** (broche, longueur de bus, résistance de tirage,
+alimentation : H-5).
+
+Trois précautions qui comptent sur un bus qui traverse un fourgon :
+
+* les **deux formats du noyau** sont lus — `temperature` (millidegrés, noyaux
+  récents) et `w1_slave` (deux lignes, noyaux plus anciens) ;
+* la **somme de contrôle** de `w1_slave` est vérifiée : sur un bus long et
+  secoué, une trame corrompue arrive vraiment, et une valeur fausse vaut moins
+  qu'une absence de valeur ;
+* la valeur **85,000 °C** est refusée : c'est la valeur d'initialisation du
+  registre de la DS18B20, pas une mesure. Une sonde qui la renvoie n'a pas
+  converti.
+
+#### Filtrage des valeurs aberrantes (R-03)
+
+`core/filters.py` apporte un `SpikeGuard` : une mesure qui s'écarte de plus de
+`temperatures.max_step_c` (12 °C par défaut) de la précédente est **mise en
+attente** plutôt que publiée. Si la mesure suivante la confirme, le changement
+est réel et les deux passent ; sinon la première est oubliée.
+
+Le compromis est explicite : une trame corrompue ne s'affiche jamais, et un
+vrai changement brutal — une porte ouverte en hiver — coûte **un seul cycle**
+de retard. Une évolution normale n'est jamais retardée. Pendant l'attente, le
+statut ne change pas : ce n'est pas une panne, c'est une trame douteuse.
+
+#### Le bus 1-Wire est vivant
+
+Il est rebalayé à chaque cycle de lecture. L'instantané transporte désormais
+`available_sensor_ids` : une sonde débranchée disparaît de la liste, une sonde
+branchée y apparaît, sans redémarrage ni bouton à presser.
+
+Une zone associée à une sonde absente du bus le dit : elle affiche `--` avec le
+statut `ABSENT` (pas `FAULT` — voir É-5), et la page Sondes marque
+l'identifiant « (absente) » sans jamais effacer l'association. Un câble
+débranché ne doit pas faire perdre un réglage.
+
+#### Association et identification à chaud
+
+C'est le manque le plus concret que l'étape comblait : **réassocier une sonde
+depuis les Paramètres prend maintenant effet immédiatement**. `AcquisitionService`
+écoute la configuration, reconstruit la sonde de la zone concernée, remet à
+zéro son filtre et invalide la valeur précédente — la température de l'ancienne
+sonde n'est jamais attribuée à la nouvelle zone, même une seconde.
+
+Pour identifier physiquement une sonde, il faut pouvoir la lire **avant** de
+décider où elle va. Tant que la section Sondes est ouverte, l'acquisition lit
+donc aussi les sondes détectées mais associées à aucune zone, et la page les
+affiche avec leur température : on en réchauffe une à la main et on regarde
+laquelle monte. Cette lecture supplémentaire **s'arrête dès qu'on quitte la
+page** — sur un bus 1-Wire, chaque sonde lue en plus l'occupe près d'une
+seconde par cycle.
+
+En simulation, une sonde mesure la température de **l'endroit où elle est
+posée**, pas de la zone à laquelle le logiciel l'attribue. Associer la sonde du
+coffre à la cabine affiche donc la température du coffre : sans cela, une
+erreur d'association resterait invisible et la page Sondes ne servirait à rien.
+
+#### Ajouts à la configuration
+
+| Clé | Défaut | Rôle |
+|---|---|---|
+| `temperatures.max_step_c` | `12.0` | écart maximal admis entre deux lectures d'une même sonde avant mise en attente |
+| `general.screen_diagonal_in` | `4.3` | diagonale physique de la dalle (ajoutée en rév. 6, pour les cibles tactiles) |
+
+#### Ce qui n'a pas changé
+
+Écrans Accueil et Paramètres : aucune modification visuelle, hors la section
+Sondes qui affiche désormais ce que l'étape 1 avait prévu (« Sondes
+détectées : N ») et le bloc des sondes libres pendant l'identification. Le
+panneau de simulation, les alertes, la calibration, le chauffage : inchangés.

@@ -6,6 +6,8 @@ toujours où l'on est, et revenir en arrière ne demande jamais de chercher.
 
 from __future__ import annotations
 
+from typing import Callable
+
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QHBoxLayout,
@@ -49,6 +51,7 @@ class SettingsPage(QWidget):
         metrics: Metrics,
         profile: LayoutProfile,
         implicit_bindings: dict | None = None,
+        on_identification: Callable[[bool], None] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -83,7 +86,8 @@ class SettingsPage(QWidget):
             "alerts": AlertsSettings(config, metrics),
             "calibration": CalibrationSettings(tanks, metrics),
             "sensors": SensorsSettings(config, sensor_ids, metrics,
-                                       implicit_bindings=implicit_bindings),
+                                       implicit_bindings=implicit_bindings,
+                                       on_identification=on_identification),
             "history": HistorySettings(config, metrics),
         }
 

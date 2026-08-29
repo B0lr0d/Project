@@ -380,5 +380,7 @@ class SnapshotBuilder:
             battery=self.battery.build(acquisition.battery),
             circuits=self.heating.build(temperatures, acquisition.valves),
             alerts=(),
+            available_sensor_ids=acquisition.available_sensor_ids,
+            sensor_temperatures=dict(acquisition.sensor_temperatures),
             simulation=acquisition.simulation,
         )

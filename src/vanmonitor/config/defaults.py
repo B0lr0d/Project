@@ -44,6 +44,10 @@ DEFAULTS: dict[str, Any] = {
         "read_timeout_s": 3.0,
         "stale_after_s": 60,
         "valid_range_c": [-40.0, 85.0],
+        # Écart maximal admis entre deux lectures successives d'une même
+        # sonde. Au-delà, la valeur attend confirmation par la mesure
+        # suivante : un bus 1-Wire secoué produit des trames aberrantes.
+        "max_step_c": 12.0,
         "zones": {
             "local_batterie": {
                 "label": "Local batterie", "sensor_id": None,

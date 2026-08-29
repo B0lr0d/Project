@@ -38,6 +38,108 @@ class HalBundle:
     #: Présent uniquement en simulation ; ``None`` sur le matériel réel.
     sim_state: object | None = None
 
+    # ------------------------------------------------------------------
+    # Le bus 1-Wire vit : on y branche et on y débranche des sondes.
+    # ------------------------------------------------------------------
+    def scan_temperature_sensor_ids(self) -> list[str]:
+        """Identifiants réellement présents sur le bus, à cet instant.
+
+        Ne lève jamais : un bus absent rend une liste vide, ce qui est la
+        vérité et non une panne.
+        """
+        if self.simulation:
+            return list(self.sim_state.present_sensor_ids())     # type: ignore[union-attr]
+        from .real.ds18b20 import scan_sensor_ids
+        return scan_sensor_ids()
+
+    def rebuild_temperature_sensor(
+        self, config: ConfigStore, zone: ZoneId,
+    ) -> TemperatureSensor | None:
+        """Reconstruit la sonde d'une zone après changement d'association.
+
+        Appelé quand l'utilisateur réassocie une sonde depuis les Paramètres :
+        sans cela, la nouvelle association ne prendrait effet qu'au prochain
+        démarrage.
+        """
+        sensor = build_temperature_sensor(
+            config, zone, simulation=self.simulation, sim_state=self.sim_state,
+        )
+        self.temperature_sensors[zone] = sensor
+        return sensor
+
+    def sensor_for_id(
+        self, config: ConfigStore, sensor_id: str,
+    ) -> TemperatureSensor | None:
+        """Sonde correspondant à un identifiant, associée ou non à une zone.
+
+        Sert à l'identification physique : on doit pouvoir lire une sonde
+        détectée sur le bus avant de décider à quelle zone elle appartient.
+        """
+        timeout = float(config.get("temperatures.read_timeout_s", 3.0))
+        if self.simulation:
+            from .sim.sim_state import SIM_SENSOR_IDS
+            from .sim.mock_temperature import MockTemperatureSensor
+            for zone, simulated_id in SIM_SENSOR_IDS.items():
+                if simulated_id == sensor_id:
+                    return MockTemperatureSensor(
+                        zone, self.sim_state, timeout_s=timeout,   # type: ignore[arg-type]
+                    )
+            return None
+        try:
+            from .real.ds18b20 import DS18B20Sensor
+            return DS18B20Sensor(sensor_id, timeout_s=timeout)
+        except Exception as exc:
+            logger.warning("sonde %s : construction impossible (%s)", sensor_id, exc)
+            return None
+
+
+def build_temperature_sensor(
+    config: ConfigStore,
+    zone: ZoneId,
+    *,
+    simulation: bool,
+    sim_state: object | None = None,
+) -> TemperatureSensor | None:
+    """Construit la sonde d'une zone, ou ``None`` si la zone n'en a pas.
+
+    Une zone sans sonde associée est un état normal, pas une panne : l'écran
+    affichera ``--`` et tout le reste continuera de fonctionner.
+    """
+    configured_id = config.get(f"temperatures.zones.{zone.value}.sensor_id")
+    timeout = float(config.get("temperatures.read_timeout_s", 3.0))
+
+    if simulation:
+        from .sim.mock_temperature import MockTemperatureSensor
+        from .sim.sim_state import SIM_SENSOR_IDS
+
+        # Une sonde mesure la température de l'endroit où elle est posée, pas
+        # de la zone à laquelle le logiciel l'attribue. Associer la sonde du
+        # coffre à la cabine doit donc afficher la température du coffre : sans
+        # cela, une erreur d'association resterait invisible et la page Sondes
+        # ne servirait à rien.
+        target_id = configured_id or SIM_SENSOR_IDS[zone]
+        physical_zone = (sim_state.zone_of_sensor(target_id)      # type: ignore[union-attr]
+                         if sim_state is not None else None)
+        if physical_zone is None:
+            logger.info("simulation : zone %s associée à %s, sonde absente du bus",
+                        zone.value, configured_id)
+            return None
+        if configured_id is None:
+            # Confort : en simulation, une zone non associée l'est d'office,
+            # sans que rien ne soit écrit dans la configuration.
+            logger.debug("simulation : association automatique %s → %s",
+                         zone.value, target_id)
+        return MockTemperatureSensor(physical_zone, sim_state, timeout_s=timeout)
+
+    if not configured_id:
+        return None
+    try:
+        from .real.ds18b20 import DS18B20Sensor
+        return DS18B20Sensor(configured_id, timeout_s=timeout)
+    except Exception as exc:        # un pilote fautif ne bloque pas les autres
+        logger.error("sonde %s : construction impossible (%s)", configured_id, exc)
+        return None
+
 
 def build_hal(config: ConfigStore, *, simulation: bool) -> HalBundle:
     """Construit tout le matériel décrit par la configuration."""
@@ -53,31 +155,15 @@ def build_hal(config: ConfigStore, *, simulation: bool) -> HalBundle:
 def _build_simulated(config: ConfigStore) -> HalBundle:
     from .sim.mock_level import MockLevelSensor
     from .sim.mock_smartshunt import MockSmartShuntInterface
-    from .sim.mock_temperature import MockTemperatureSensor
     from .sim.mock_valve import MockValveDriver
-    from .sim.sim_state import SIM_SENSOR_IDS, SimState
+    from .sim.sim_state import SimState
 
     sim_state = SimState()
     bundle = HalBundle(simulation=True, sim_state=sim_state)
 
-    temp_timeout = float(config.get("temperatures.read_timeout_s", 3.0))
     for zone in ZONE_ORDER:
-        configured_id = config.get(f"temperatures.zones.{zone.value}.sensor_id")
-        simulated_id = SIM_SENSOR_IDS[zone]
-        if configured_id not in (None, simulated_id):
-            # L'utilisateur a associé une sonde réelle : en simulation, cette
-            # sonde n'existe pas. La zone reste donc non associée.
-            logger.info("simulation : zone %s associée à %s, sonde inconnue ici",
-                        zone.value, configured_id)
-            bundle.temperature_sensors[zone] = None
-            continue
-        if configured_id is None:
-            # Confort : en simulation, les zones non associées le sont
-            # automatiquement, sans écrire dans la configuration.
-            logger.debug("simulation : association automatique %s → %s",
-                         zone.value, simulated_id)
-        bundle.temperature_sensors[zone] = MockTemperatureSensor(
-            zone, sim_state, timeout_s=temp_timeout,
+        bundle.temperature_sensors[zone] = build_temperature_sensor(
+            config, zone, simulation=True, sim_state=sim_state,
         )
 
     level_timeout = float(config.get("tanks.read_timeout_s", 1.0))
@@ -115,9 +201,8 @@ def _build_real(config: ConfigStore) -> HalBundle:
     bundle = HalBundle(simulation=False)
 
     for zone in ZONE_ORDER:
-        bundle.temperature_sensors[zone] = _try_build(
-            f"sonde {zone.value}",
-            lambda zone=zone: _build_ds18b20(config, zone),
+        bundle.temperature_sensors[zone] = build_temperature_sensor(
+            config, zone, simulation=False,
         )
 
     for tank in TANK_ORDER:
@@ -148,16 +233,6 @@ def _try_build(label: str, builder):
     except Exception as exc:        # un pilote fautif ne bloque pas les autres
         logger.error("%s : construction impossible (%s)", label, exc)
     return None
-
-
-def _build_ds18b20(config: ConfigStore, zone: ZoneId):
-    sensor_id = config.get(f"temperatures.zones.{zone.value}.sensor_id")
-    if not sensor_id:
-        return None         # zone non associée : état normal, pas une panne
-    from .real.ds18b20 import DS18B20Sensor
-    return DS18B20Sensor(
-        sensor_id, timeout_s=float(config.get("temperatures.read_timeout_s", 3.0)),
-    )
 
 
 def _build_level_sensor(config: ConfigStore, tank: TankId):

@@ -187,6 +187,26 @@ class SimState:
         with self._lock:
             return dict(self._temperatures)
 
+    def present_sensor_ids(self) -> list[str]:
+        """Sondes actuellement visibles sur le bus 1-Wire simulé.
+
+        Une sonde mise en panne « Absent » disparaît du bus, exactement comme
+        une sonde débranchée : la section Sondes des Paramètres doit pouvoir le
+        montrer sans qu'on aille bricoler un fichier système.
+        """
+        with self._lock:
+            return [
+                SIM_SENSOR_IDS[zone] for zone in ZoneId
+                if self._temp_faults[zone] is not FaultMode.ABSENT
+            ]
+
+    def zone_of_sensor(self, sensor_id: str) -> ZoneId | None:
+        """Zone du fourgon virtuel où se trouve physiquement cette sonde."""
+        for zone, simulated_id in SIM_SENSOR_IDS.items():
+            if simulated_id == sensor_id:
+                return zone
+        return None
+
     # ------------------------------------------------------------------
     # Niveaux
     # ------------------------------------------------------------------

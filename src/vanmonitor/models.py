@@ -194,6 +194,13 @@ class AcquisitionSnapshot:
     #: l'absence d'actionneur.
     valves: dict[CircuitId, Sample] = field(default_factory=dict)
     workers: tuple[WorkerHealth, ...] = ()
+    #: Identifiants réellement détectés sur le bus 1-Wire au dernier balayage.
+    available_sensor_ids: tuple[str, ...] = ()
+    #: Température lue par identifiant de sonde. Sert à l'identification
+    #: physique dans les Paramètres : on réchauffe une sonde et on regarde
+    #: laquelle bouge. Ne contient les sondes non associées que lorsque le mode
+    #: identification est actif, pour ne pas charger le bus en permanence.
+    sensor_temperatures: dict[str, Sample] = field(default_factory=dict)
     simulation: bool = False
 
 
@@ -211,4 +218,8 @@ class SystemSnapshot:
     battery: BatteryReading = field(default_factory=BatteryReading)
     circuits: dict[CircuitId, CircuitStatus] = field(default_factory=dict)
     alerts: tuple[Alert, ...] = ()
+    #: Sondes détectées sur le bus, et leur température par identifiant.
+    #: Alimentent la section Sondes des Paramètres.
+    available_sensor_ids: tuple[str, ...] = ()
+    sensor_temperatures: dict[str, Sample] = field(default_factory=dict)
     simulation: bool = False
