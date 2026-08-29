@@ -34,6 +34,7 @@ __all__ = [
     "Sample",
     "SystemSnapshot",
     "TankReading",
+    "DisplayStatus",
     "TemperatureReading",
     "ValveObservation",
     "WorkerHealth",
@@ -175,6 +176,24 @@ class WorkerHealth:
 
 
 @dataclass(frozen=True)
+class DisplayStatus:
+    """État de la veille d'écran, tel que l'interface a besoin de le connaître.
+
+    ``asleep`` dit ce que le programme a commandé et cru obtenir ; si la
+    méthode d'extinction a échoué, ``last_error`` le dit et ``asleep`` reste
+    faux — se croire endormi ferait avaler le prochain toucher pour rien.
+    """
+
+    asleep: bool
+    enabled: bool
+    available: bool
+    delay_s: float
+    idle_s: float
+    method: str
+    last_error: str | None = None
+
+
+@dataclass(frozen=True)
 class AcquisitionSnapshot:
     """Ce que les threads d'acquisition ont lu, sans interprétation métier.
 
@@ -222,4 +241,6 @@ class SystemSnapshot:
     #: Alimentent la section Sondes des Paramètres.
     available_sensor_ids: tuple[str, ...] = ()
     sensor_temperatures: dict[str, Sample] = field(default_factory=dict)
+    #: État de la veille d'écran. ``None`` quand elle n'est pas gérée.
+    display: DisplayStatus | None = None
     simulation: bool = False

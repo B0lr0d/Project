@@ -16,7 +16,13 @@ from dataclasses import dataclass, field
 from ..config import ConfigStore
 from ..constants import CIRCUIT_ORDER, CircuitId, TANK_ORDER, TankId, ZONE_ORDER, ZoneId
 from ..util.logging_setup import get_logger
-from .interfaces import LevelSensor, SmartShuntInterface, TemperatureSensor, ValveDriver
+from .interfaces import (
+    DisplayPower,
+    LevelSensor,
+    SmartShuntInterface,
+    TemperatureSensor,
+    ValveDriver,
+)
 
 logger = get_logger("hal.factory")
 
@@ -35,6 +41,10 @@ class HalBundle:
     level_sensors: dict[TankId, LevelSensor | None] = field(default_factory=dict)
     smartshunt: SmartShuntInterface | None = None
     valves: dict[CircuitId, ValveDriver] = field(default_factory=dict)
+    #: Extinction de l'écran. Toujours présente : quand aucune méthode ne
+    #: convient, c'est un pilote qui le dit plutôt qu'un ``None`` à tester
+    #: partout.
+    display_power: DisplayPower | None = None
     #: Présent uniquement en simulation ; ``None`` sur le matériel réel.
     sim_state: object | None = None
 
@@ -158,8 +168,12 @@ def _build_simulated(config: ConfigStore) -> HalBundle:
     from .sim.mock_valve import MockValveDriver
     from .sim.sim_state import SimState
 
+    from .sim.mock_display_power import MockDisplayPower
+
     sim_state = SimState()
-    bundle = HalBundle(simulation=True, sim_state=sim_state)
+    bundle = HalBundle(
+        simulation=True, sim_state=sim_state, display_power=MockDisplayPower(),
+    )
 
     for zone in ZONE_ORDER:
         bundle.temperature_sensors[zone] = build_temperature_sensor(
@@ -198,7 +212,14 @@ def _build_real(config: ConfigStore) -> HalBundle:
     Une famille non encore intégrée n'empêche pas les autres de fonctionner :
     elle est simplement absente du lot, et l'écran affichera ``--``.
     """
-    bundle = HalBundle(simulation=False)
+    from .real.display_power import build_display_power
+
+    bundle = HalBundle(
+        simulation=False,
+        display_power=build_display_power(
+            str(config.get("display.sleep_method", "auto"))
+        ),
+    )
 
     for zone in ZONE_ORDER:
         bundle.temperature_sensors[zone] = build_temperature_sensor(

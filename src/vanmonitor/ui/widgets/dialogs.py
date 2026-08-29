@@ -23,7 +23,7 @@ from .primitives import label
 
 
 class SegmentedControl(QWidget):
-    """Choix exclusif entre deux ou trois options, en gros boutons collés."""
+    """Choix exclusif entre plusieurs options, en gros boutons collés."""
 
     def __init__(self, options: list[tuple[str, str]], metrics: Metrics,
                  parent: QWidget | None = None) -> None:

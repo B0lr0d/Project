@@ -3,15 +3,21 @@
 **ÉTAPE 1 — Architecture proposée (aucun code applicatif).**
 Révision 2 — intègre les corrections demandées après première relecture.
 
-Cible : Raspberry Pi 4, Raspberry Pi OS (64 bits), écran tactile 4,3"–5"
-(**modèle et résolution non choisis** — mise en page adaptative), fonctionnement
-100 % local, sans Internet.
+Cible : Raspberry Pi 4, Raspberry Pi OS (64 bits), **Waveshare 5 pouces HDMI LCD
+(H) V4** — 800 × 480, tactile capacitif, image par HDMI, tactile par USB,
+orientation paysage (retenu en rév. 8 ; la mise en page reste adaptative,
+cet écran en devient la configuration de référence). Fonctionnement 100 % local,
+sans Internet.
 
 Convention utilisée dans tout le document :
 tout élément matériel non confirmé est marqué **MATERIEL À INTEGRER PLUS TARD**
 et n'existe côté logiciel que sous forme d'interface abstraite.
 
 > **Journal des révisions**
+> **Rév. 8** — écran de référence figé (Waveshare 5" HDMI LCD (H) V4, H-6 clos)
+> et **veille de l'écran** : seul l'affichage s'éteint, le Raspberry et tous ses
+> threads restent actifs, et le premier toucher ne fait que rallumer (§13,
+> étape 4bis).
 > **Rév. 7** — étape 4 livrée : pilote DS18B20 réel, balayage du bus 1-Wire,
 > filtrage des trames aberrantes, association et identification des sondes à
 > chaud (§13). Vocabulaire des clapets aligné dans tout le document.
@@ -99,10 +105,17 @@ ne fait **aucune** I/O.
 | `battery_worker` | SmartShunt VE.Direct (série) | lecture au fil de l'eau | oui — bloquante, avec délai d'expiration |
 | `valve_worker` | exécution des ordres de clapets | sur file | oui |
 | `control_worker` | commandes, chauffage, alertes, snapshot | 1 Hz | **non** |
+| `display_worker` | veille de l'écran (rév. 8) | 1 Hz, réveil immédiat sur événement | oui — commande externe ou écriture sysfs |
 | `history_worker` | écriture SQLite par lots | selon période | non (disque uniquement) |
 
-Six threads en fonctionnement normal, sept si l'historique est activé. Le thread
+Sept threads en fonctionnement normal, huit si l'historique est activé. Le thread
 d'historique **n'est pas créé** quand l'historique est désactivé.
+
+`display_worker` existe pour une seule raison : éteindre un écran est une
+entrée-sortie, et une entrée-sortie n'a rien à faire dans le thread graphique.
+Il attend un événement plutôt qu'une échéance, de sorte qu'un réveil demandé par
+un doigt est traité tout de suite. **Il ne suspend aucun autre thread** : quand
+l'écran dort, tous les autres continuent exactement comme avant.
 
 #### Les trois garanties demandées
 
@@ -230,7 +243,8 @@ Project/
 │   ├── hal/
 │   │   ├── __init__.py
 │   │   ├── interfaces.py              # TemperatureSensor, LevelSensor, ADCInterface,
-│   │   │                              # SmartShuntInterface, ValveDriver + contrat de délai
+│   │   │                              # SmartShuntInterface, ValveDriver, DisplayPower
+│   │   │                              # + contrat de délai
 │   │   ├── factory.py                 # build_hal(config, simulation: bool) -> HalBundle
 │   │   ├── real/
 │   │   │   ├── __init__.py
@@ -238,14 +252,16 @@ Project/
 │   │   │   ├── adc_level.py           # MATERIEL À INTEGRER PLUS TARD (convertisseur non choisi)
 │   │   │   ├── smartshunt_vedirect.py # VE.Direct filaire → interface USB → port série
 │   │   │   ├── vedirect_parser.py     # décodage des trames, séparé de la liaison (testable seul)
-│   │   │   └── valve_driver.py        # MATERIEL À INTEGRER PLUS TARD (actionneur non choisi)
+│   │   │   ├── valve_driver.py        # MATERIEL À INTEGRER PLUS TARD (actionneur non choisi)
+│   │   │   └── display_power.py       # extinction de l'écran : vcgencmd / xset / bl_power (rév. 8)
 │   │   └── sim/
 │   │       ├── __init__.py
 │   │       ├── sim_state.py           # état simulé partagé, piloté par le panneau de simulation
 │   │       ├── mock_temperature.py    # MockTemperatureSensor
 │   │       ├── mock_level.py          # MockLevelSensor
 │   │       ├── mock_smartshunt.py     # MockSmartShuntInterface
-│   │       └── mock_valve.py          # MockValveDriver (avec et sans retour de position)
+│   │       ├── mock_valve.py          # MockValveDriver (avec et sans retour de position)
+│   │       └── mock_display_power.py  # écran simulé, capable de refuser de s'éteindre (rév. 8)
 │   │
 │   ├── core/
 │   │   ├── __init__.py
@@ -262,6 +278,7 @@ Project/
 │   │   ├── battery_service.py         # BatteryService (SmartShunt)
 │   │   ├── heating.py                 # HeatingCircuit + HeatingController (hystérésis)
 │   │   ├── alerts.py                  # AlertEngine + règles
+│   │   ├── display.py                 # DisplayController + DisplayWorker (veille, rév. 8)
 │   │   └── history.py                 # HistoryRecorder (SQLite, désactivé par défaut)
 │   │
 │   ├── ui/
@@ -277,6 +294,7 @@ Project/
 │   │   │   ├── alerts_settings.py
 │   │   │   ├── calibration_settings.py
 │   │   │   ├── sensors_settings.py    # association des identifiants DS18B20
+│   │   │   ├── display_settings.py    # veille de l'écran (rév. 8)
 │   │   │   └── history_settings.py
 │   │   ├── widgets/
 │   │   │   ├── tile.py                # tuile de mesure (grand chiffre + unité)
@@ -286,6 +304,7 @@ Project/
 │   │   │   ├── alert_bar.py
 │   │   │   ├── numeric_keypad.py      # pavé numérique tactile
 │   │   │   └── touch_controls.py      # boutons/bascules dimensionnés en millimètres
+│   │   ├── wake_guard.py              # le premier toucher réveille, et rien d'autre (rév. 8)
 │   │   ├── snapshot_text.py           # rendu texte sans Qt (ajouté rév. 4, voir §13)
 │   │   └── sim_panel.py               # fenêtre de simulation
 │   │
@@ -372,6 +391,9 @@ class SensorLossFallback(Enum):  OPEN, CLOSE, HOLD
 class ValveCommand(Enum):    OPEN, CLOSE, STOP, NONE      # ce que le logiciel a demandé
 class ConfirmedState(Enum):  OUVERT, FERME, INCONNU       # ce que le matériel confirme réellement
 class ValveState(Enum):      OUVERT, FERME, OUVERTURE, FERMETURE, ERREUR, INCONNU  # état affiché
+
+# --- veille de l'écran (rév. 8) : même distinction ordre / état réel ---
+class DisplayState(Enum):    ON, OFF, INCONNU
 ```
 
 ```python
@@ -441,6 +463,16 @@ class Alert:
     active_since: float
 
 @dataclass(frozen=True)
+class DisplayStatus:               # rév. 8
+    asleep: bool                   # ce que le programme a commandé et cru obtenir
+    enabled: bool
+    available: bool                # False = aucune méthode d'extinction sur cette machine
+    delay_s: float
+    idle_s: float
+    method: str                    # "vcgencmd", "backlight (rpi_backlight)", …
+    last_error: str | None         # dernier échec d'extinction ou de rallumage
+
+@dataclass(frozen=True)
 class SystemSnapshot:
     timestamp: float
     temperatures: dict[ZoneId, TemperatureReading]
@@ -448,6 +480,7 @@ class SystemSnapshot:
     battery: BatteryReading
     circuits: dict[CircuitId, CircuitStatus]
     alerts: tuple[Alert, ...]
+    display: DisplayStatus | None  # rév. 8 ; None quand la veille n'est pas gérée
     simulation: bool
 ```
 
@@ -535,6 +568,26 @@ class ValveDriver(ABC):
 
     @abstractmethod
     def has_fault(self) -> bool: ...
+
+
+class DisplayPower(ABC):
+    """Extinction et rallumage de l'affichage (rév. 8).
+
+    Seul l'écran est concerné : ni le Raspberry, ni les threads, ni le
+    programme. Comme pour les clapets, l'ordre donné et l'état réel sont
+    distincts — certaines méthodes ne savent pas relire la dalle et renvoient
+    alors INCONNU, ce qui n'est pas une panne.
+    """
+    @abstractmethod
+    def sleep(self) -> None: ...            # lève HardwareError si la méthode échoue
+    @abstractmethod
+    def wake(self) -> None: ...
+    @abstractmethod
+    def state(self) -> DisplayState: ...    # ON / OFF / INCONNU
+    @abstractmethod
+    def is_available(self) -> bool: ...     # False = veille inopérante, et annoncée comme telle
+    @abstractmethod
+    def describe(self) -> str: ...          # méthode retenue, affichée dans les Paramètres
 ```
 
 ### 4.3 Acquisition et supervision (`core/workers.py`, `core/state.py`)
@@ -679,7 +732,14 @@ Emplacement : `/var/lib/vanmonitor/config.json` (persistant, hors dépôt).
   "general": {
     "simulation": false,
     "fullscreen": true,
-    "ui_refresh_hz": 2
+    "ui_refresh_hz": 2,
+    "screen_diagonal_in": 5.0          // Waveshare 5" (rév. 8)
+  },
+
+  "display": {                         // veille de l'écran (rév. 8)
+    "sleep_enabled": true,
+    "sleep_delay_s": 300,              // 5 min
+    "sleep_method": "auto"             // auto | vcgencmd | xset | backlight | none
   },
 
   "workers": {
@@ -897,10 +957,16 @@ Vérifié automatiquement par `tests/test_imports.py`.
 
 ## 7. Maquette détaillée — écran Accueil
 
-### 7.1 Contrainte d'affichage (rév. 2)
+### 7.1 Contrainte d'affichage (rév. 2, écran figé en rév. 8)
 
-Le modèle d'écran n'est pas choisi. La mise en page est donc **adaptative**,
-pour une dalle tactile de 4,3" à 5" :
+L'écran retenu est le **Waveshare 5 pouces HDMI LCD (H) V4** : 800 × 480,
+tactile capacitif, image par HDMI, tactile par USB, orientation paysage. C'est
+désormais la **configuration de référence** — celle sur laquelle les captures
+sont produites et les cibles tactiles vérifiées.
+
+La mise en page reste néanmoins **adaptative**, comme depuis la rév. 2 : rien
+n'y est figé à 800 × 480, ce qui permet de mettre au point sur un PC et de
+changer de dalle sans réécrire l'interface.
 
 * aucune position ni taille en pixels absolus : uniquement des dispositions Qt
   proportionnelles ;
@@ -915,8 +981,8 @@ pour une dalle tactile de 4,3" à 5" :
 * enveloppe de validation : la disposition doit rester lisible de 480 × 272 à
   1024 × 600.
 
-La maquette ci-dessous est représentée à 800 × 480, résolution la plus courante
-dans cette gamme, **à titre de représentation et non de spécification**.
+La maquette ci-dessous est représentée à 800 × 480, la résolution de l'écran
+retenu.
 
 ### 7.2 Écran
 
@@ -1022,8 +1088,8 @@ Deux niveaux seulement : rail de sections à gauche, contenu à droite.
 │ ALERTES      │                                                           │
 │ CALIBRATION  │  Local eau                            [ AUTO ] [ MANUEL ] │
 │ SONDES       │    Ouverture   [   5,0 °C  ]   Fermeture  [   8,0 °C  ]   │
-│ HISTORIQUE   │    État : OUVERTURE COMMANDÉE  [ OUVRIR ] [ FERMER ]      │
-│              │    Repli si sonde perdue  ⚠                               │
+│ ÉCRAN        │    État : OUVERTURE COMMANDÉE  [ OUVRIR ] [ FERMER ]      │
+│ HISTORIQUE   │    Repli si sonde perdue  ⚠                               │
 │              │      [ OUVRIR ] [ FERMER ] [ MAINTENIR ]                  │
 │              │  ───────────────────────────────────────────────────────  │
 │              │  Local batterie                       [ AUTO ] [ MANUEL ] │
@@ -1169,6 +1235,29 @@ active tant que la nouvelle est invalide.
 
 Une même sonde ne peut pas être associée à deux zones.
 
+### Section ÉCRAN (rév. 8)
+```
+  VEILLE DE L'ÉCRAN
+  [ Désactivée ] [ 1 min ] [ 5 min ] [ 10 min ] [ 30 min ]     ← 5 min par défaut
+  État                          écran allumé  ·  veille dans 4 min 59
+
+  L'écran seul s'éteint. Le Raspberry reste allumé : les températures, les
+  niveaux et la batterie continuent d'être lus, le chauffage continue de
+  réguler, et les alertes restent actives.
+
+  Le premier appui sur un écran éteint sert uniquement à le rallumer :
+  il ne déclenche aucune commande.
+```
+
+Un seul contrôle : le délai, `Désactivée` valant « jamais ». Deux réglages
+distincts dans le fichier (`display.sleep_enabled`, `display.sleep_delay_s`)
+mais **une seule décision** à l'écran, parce que « activer la veille puis
+choisir un délai » serait deux gestes pour une seule intention.
+
+La ligne d'état affiche ce que la veille fait réellement — le temps restant,
+l'écran endormi, ou l'indisponibilité de la méthode d'extinction sur la machine
+en cours. Une veille qui ne fonctionne pas doit le dire, pas se taire.
+
 ### Section HISTORIQUE
 ```
   Historique              [ ○ activé  /  ● désactivé ]     ← désactivé par défaut
@@ -1201,7 +1290,6 @@ avertissement et confirmation explicite (rév. 3).
 | H-2 | **Convertisseur analogique-numérique** | modèle, bus et nombre de voies non choisis | `ADCInterface.read_channel(channel)` |
 | H-3 | **Actionneurs des 3 circuits de chauffage** | type d'actionneur, alimentation, **et surtout : présence ou non d'un retour de position** | `ValveDriver` avec `get_commanded_state()`, `get_confirmed_state()`, `has_position_feedback()` |
 | H-5 | **Câblage 1-Wire des DS18B20** | broche utilisée, longueur de bus, résistance de tirage, alimentation | chemin `/sys/bus/w1/devices` (interface noyau standard) |
-| H-6 | **Écran tactile 4,3"–5"** | modèle et résolution non choisis | mise en page adaptative, aucun pixel absolu (§7.1) |
 
 ### H-4 — Liaison SmartShunt : **résolue (rév. 2)**
 
@@ -1224,12 +1312,40 @@ Le Bluetooth n'est pas retenu. Conséquences :
 * seuls restent à préciser : la **référence exacte de l'interface VE.Direct/USB**
   et le nom stable définitif du port. Aucun des deux ne bloque l'étape 2.
 
-### Retirés du périmètre initial (rév. 2)
+### H-6 — Écran tactile : **résolu (rév. 8)**
 
-Horloge temps réel, avertisseur sonore, pilotage de luminosité et mise en veille
-de l'écran : **non implémentés**, non prévus dans la configuration, non affichés
-dans l'interface. Ils ne font pas partie du besoin initial et pourront être
-ajoutés plus tard sans remise en cause de l'architecture.
+**Waveshare 5 pouces HDMI LCD (H) V4** — 800 × 480, tactile capacitif, image par
+HDMI, tactile par USB, orientation paysage.
+
+Deux conséquences logicielles :
+
+* `general.screen_diagonal_in` passe de `4.3` à **`5.0`** : les cibles tactiles
+  sont dimensionnées en millimètres réels et dépendaient donc de cette valeur.
+  La mise en page reste adaptative (§7.1) ; rien n'est figé à 800 × 480.
+* **L'image et le tactile empruntent deux liaisons distinctes.** Couper la
+  sortie HDMI n'éteint pas le contrôleur tactile USB : le doigt continue d'être
+  vu par le système, et peut donc rallumer l'écran. C'est ce qui rend la veille
+  (§13, étape 4bis) réalisable sans matériel supplémentaire.
+
+Ce qui reste ouvert : **la commande exacte d'extinction**. Elle dépend de la
+pile graphique installée (X11 ou KMS) autant que de la dalle, et n'a pas encore
+été éprouvée sur ce Waveshare. `hal/real/display_power.py` en essaie donc trois
+(`vcgencmd`, `xset dpms`, `/sys/class/backlight`) et le choix peut être imposé
+par `display.sleep_method`. Si aucune ne fonctionne, la veille s'annonce
+indisponible dans les Paramètres plutôt que d'échouer en silence.
+
+
+### Retirés du périmètre initial (rév. 2, révisé en rév. 8)
+
+Horloge temps réel, avertisseur sonore et pilotage de luminosité :
+**non implémentés**, non prévus dans la configuration, non affichés dans
+l'interface. Ils ne font pas partie du besoin initial et pourront être ajoutés
+plus tard sans remise en cause de l'architecture.
+
+La **mise en veille de l'écran** figurait dans cette liste jusqu'à la rév. 7 :
+elle est demandée et livrée en rév. 8 (§13, étape 4bis). Elle n'éteint que
+l'affichage — c'est une extinction de dalle, pas une mise en veille du
+Raspberry, et rien de ce que le système surveille ne s'interrompt.
 
 ---
 
@@ -1254,9 +1370,11 @@ ajoutés plus tard sans remise en cause de l'architecture.
 | **R-15** | **Plantage de l'application** | perte de l'affichage et de la commande | redémarrage automatique par systemd avec temporisation croissante ; au redémarrage, l'état des clapets est `INCONNU` tant qu'il n'est ni relu ni recommandé — jamais supposé |
 | **R-16** | **Thread d'acquisition définitivement bloqué** dans un appel système : Python ne permet pas de le tuer | fuite d'un thread, famille de capteurs perdue | limite assumée et contenue : thread *daemon* abandonné, remplaçant créé avec temporisation croissante, un seul à la fois, alerte technique ; isolation en sous-processus tenue en réserve si un pilote réel le justifie (§1.2) |
 | **R-17** | **Divergence entre mode simulé et mode réel** | anomalies découvertes seulement dans le fourgon | les mocks implémentent les mêmes interfaces et simulent les **pannes** : absence, valeur aberrante, lecture qui dure, coupure de liaison, défaut de clapet, **et clapet sans retour de position** |
-| **R-18** | **Résolution et modèle d'écran inconnus** | mise en page cassée sur la dalle réelle | aucun pixel absolu, échelle calculée à l'exécution, deux profils de disposition, enveloppe de validation 480 × 272 → 1024 × 600 |
+| **R-18** | **Résolution et modèle d'écran inconnus** | mise en page cassée sur la dalle réelle | **clos (rév. 8)** : Waveshare 5" 800 × 480 retenu (H-6). Les mesures restent en place — aucun pixel absolu, échelle calculée à l'exécution, deux profils, enveloppe 480 × 272 → 1024 × 600 — pour ne pas dépendre d'un modèle précis |
 | **R-19** | **Performances graphiques** si le rafraîchissement est trop fréquent | interface saccadée, chauffe | 2 Hz, redessin des seuls éléments modifiés, aucune animation permanente |
-| **R-20** | **Consommation du Raspberry en stationnement** | décharge de la batterie auxiliaire | hors périmètre logiciel initial ; à traiter au niveau électrique |
+| **R-20** | **Consommation du Raspberry en stationnement** | décharge de la batterie auxiliaire | hors périmètre logiciel initial ; à traiter au niveau électrique. La veille d'écran (rév. 8) réduit la consommation de la dalle, mais **pas celle du Raspberry** : elle n'est pas une réponse à ce risque |
+| **R-21** | **Méthode d'extinction de l'écran inopérante** sur la pile graphique réellement installée (rév. 8) | veille silencieusement sans effet, ou pire : écran noir qui ne se rallume pas | trois méthodes essayées et choix forçable (`display.sleep_method`) ; l'indisponibilité est **affichée** dans les Paramètres ; un échec d'extinction **ou** de rallumage laisse l'état interne à « allumé », pour ne jamais avaler le toucher suivant ; rallumage systématique à l'arrêt du programme |
+| **R-22** | **Le toucher de réveil active ce qui se trouve sous le doigt** (rév. 8) | ouverture d'un clapet ou modification d'un seuil sans intention, sur un écran qu'on ne voyait pas | le geste de réveil entier — appui, déplacements, relâchement — est absorbé par un filtre posé sur l'application (`ui/wake_guard.py`) ; garde-fou de 2 s si le relâchement n'arrive jamais |
 
 ---
 
@@ -1270,8 +1388,9 @@ Aucun ne bloque l'étape 2.
 | 2 | **Capacité du réservoir d'eau propre** | facultatif : elle sera déduite de la calibration. Déclarable à tout moment |
 | 3 | **Capteurs de niveau et convertisseur** (H-1, H-2) | étape 11 |
 | 4 | **Actionneurs de clapets, avec ou sans retour de position** (H-3) | étape 11. Les deux cas sont déjà couverts par le modèle |
-| 5 | **Modèle et résolution d'écran** (H-6) | étape 11. L'interface est adaptative d'ici là |
+| 5 | ~~**Modèle et résolution d'écran** (H-6)~~ | **tranché en rév. 8** : Waveshare 5" HDMI LCD (H) V4, 800 × 480 |
 | 6 | **Référence de l'interface VE.Direct/USB et nom stable du port** | étape 6, au premier branchement |
+| 7 | **Méthode d'extinction retenue pour ce Waveshare** (rév. 8) | au premier essai sur le Raspberry. `auto` d'ici là ; `display.sleep_method` permet de la figer sans toucher au code |
 
 ---
 
@@ -1391,8 +1510,9 @@ même vocabulaire.
 
 **C-2 — Cibles tactiles dimensionnées en millimètres réels.** Elles ne sont
 plus exprimées en pixels mais converties depuis la **taille physique** de la
-dalle, via une nouvelle clé `general.screen_diagonal_in` (4,3" par défaut, la
-borne la plus contraignante de la fourchette annoncée) :
+dalle, via une nouvelle clé `general.screen_diagonal_in` (4,3" par défaut à
+l'époque, la borne la plus contraignante de la fourchette annoncée ; **5,0"
+depuis la rév. 8**, l'écran étant désormais choisi) :
 
 | Dalle | Résolution | Cible tactile | Navigation |
 |---|---|---|---|
@@ -1508,7 +1628,7 @@ erreur d'association resterait invisible et la page Sondes ne servirait à rien.
 | Clé | Défaut | Rôle |
 |---|---|---|
 | `temperatures.max_step_c` | `12.0` | écart maximal admis entre deux lectures d'une même sonde avant mise en attente |
-| `general.screen_diagonal_in` | `4.3` | diagonale physique de la dalle (ajoutée en rév. 6, pour les cibles tactiles) |
+| `general.screen_diagonal_in` | `4.3`, porté à `5.0` en rév. 8 | diagonale physique de la dalle (ajoutée en rév. 6, pour les cibles tactiles) |
 
 #### Ce qui n'a pas changé
 
@@ -1516,3 +1636,108 @@ erreur d'association resterait invisible et la page Sondes ne servirait à rien.
 Sondes qui affiche désormais ce que l'étape 1 avait prévu (« Sondes
 détectées : N ») et le bloc des sondes libres pendant l'identification. Le
 panneau de simulation, les alertes, la calibration, le chauffage : inchangés.
+
+---
+
+### Étape 4bis — écran de référence et veille de l'affichage (livrée)
+
+Deux demandes intercalées avant l'étape 5 : figer l'écran de référence, et
+mettre l'affichage en veille sans rien endormir d'autre.
+
+#### Ce que la veille éteint, et ce qu'elle ne touche pas
+
+C'est la seule chose qui compte vraiment ici. Un tableau de bord qui cesserait
+de surveiller pendant qu'il dort ne serait plus un tableau de bord.
+
+| Éteint | Continue |
+|---|---|
+| l'affichage (sortie HDMI ou rétroéclairage) | l'application PyQt5, jamais fermée |
+| | les six threads d'acquisition, aucun suspendu |
+| | la lecture des cinq sondes, des trois niveaux, du SmartShunt |
+| | la boucle de contrôle à 1 Hz et l'assemblage de l'instantané |
+| | l'évaluation des alertes |
+| | la chaîne du chauffage : file de commandes, clapets, relecture de position |
+| | Linux, qui n'est ni mis en veille ni suspendu |
+
+Aucun appel à `quit()`, `close()`, `systemctl suspend` ou équivalent n'existe
+dans le code de la veille. L'interface graphique continue même de se rafraîchir
+derrière l'écran noir : la rallumer n'a donc aucun temps de reconstruction.
+
+#### Découpage
+
+| Fichier | Rôle |
+|---|---|
+| `hal/interfaces.py` → `DisplayPower` | contrat abstrait : `sleep()`, `wake()`, `state()`, `is_available()`, `describe()` |
+| `hal/real/display_power.py` | trois méthodes réelles (`vcgencmd`, `xset dpms`, `bl_power`) + `NullDisplayPower` quand aucune ne convient |
+| `hal/sim/mock_display_power.py` | écran simulé, capable de **refuser** de s'éteindre |
+| `core/display.py` | `DisplayController` (la règle) et `DisplayWorker` (le thread qui l'applique) |
+| `ui/wake_guard.py` | filtre d'événements : le premier toucher réveille, et rien d'autre |
+| `ui/settings/display_settings.py` | la section ÉCRAN des Paramètres |
+
+Le découpage suit celui du reste du projet : `core/` décide, `hal/` exécute,
+`ui/` ne fait que demander. `core/display.py` ne connaît que `hal.interfaces`,
+et l'extinction elle-même — une commande externe, une écriture sysfs — a lieu
+dans un thread dédié, jamais dans le thread graphique.
+
+Le réveil reste immédiat parce que ce thread **attend un événement** plutôt
+qu'une échéance : le doigt le débloque, il n'attend pas la fin de sa période.
+
+#### Le premier toucher ne fait que réveiller
+
+Sur un écran noir, on ne voit pas ce qui se trouve sous le doigt. Si le premier
+contact activait le bouton en dessous, on ouvrirait un clapet ou on changerait
+un seuil sans l'avoir voulu.
+
+`WakeGuard` est donc posé sur le `QApplication` — pas sur une fenêtre : ainsi
+aucun événement ne peut le contourner. Il absorbe le **geste entier** (appui,
+déplacements, relâchement), avec un garde-fou de 2 s si le relâchement n'arrive
+jamais. Dès le doigt levé, l'interface est normalement utilisable : il n'y a
+aucun délai supplémentaire, et le deuxième appui agit.
+
+Le même filtre sert à repousser la veille : toute interaction, réveil compris,
+remet le compteur d'inactivité à zéro.
+
+#### Une veille qui échoue le dit
+
+La méthode d'extinction dépend de la pile graphique installée, pas seulement de
+la dalle (R-21). Deux règles en découlent :
+
+* si `sleep()` échoue, l'état interne **reste « allumé »**. Se croire endormi
+  ferait avaler le toucher suivant pour rien ;
+* si `wake()` échoue, même chose, pour la même raison.
+
+Dans les deux cas le message d'erreur remonte jusqu'à la section ÉCRAN. Une
+veille indisponible s'affiche comme telle ; elle n'échoue jamais en silence.
+À l'arrêt du programme, l'écran est systématiquement rallumé : on ne laisse pas
+un noir derrière soi.
+
+#### Écarts d'implémentation
+
+| # | Écart | Raison |
+|---|---|---|
+| **É-11** | **Une sixième entrée « Écran » dans le rail des Paramètres** — seule modification visuelle de cette étape | Aucune des cinq sections existantes (Chauffage, Alertes, Calibration, Sondes, Historique) ne pouvait accueillir honnêtement un réglage d'affichage. Le rail tient : 6 × 48 px + 5 × 4 px = 308 px pour ≈ 319 px disponibles en 800 × 480. Les écrans Accueil et Paramètres sont inchangés par ailleurs |
+| **É-12** | **Un seul contrôle pour deux clés** (`sleep_enabled`, `sleep_delay_s`) | « Activer la veille » puis « choisir un délai » sont deux gestes pour une seule intention. `Désactivée` écrit `sleep_enabled = false` et **conserve** le délai précédent, qui est retrouvé tel quel à la réactivation |
+| **É-13** | **La commande d'extinction n'est pas figée** | Elle n'a pas été éprouvée sur ce Waveshare, et l'inventer serait contraire à la règle du projet. Trois méthodes sont essayées dans l'ordre, `display.sleep_method` permet d'en imposer une, et l'échec est visible (point ouvert n° 7) |
+| **É-14** | **Une alerte ne rallume pas l'écran** | Cela n'a pas été demandé, et un rallumage automatique en pleine nuit serait une décision à prendre, pas à supposer. Les alertes continuent d'être évaluées et sont là, affichées, dès le réveil |
+
+#### Ajouts à la configuration
+
+| Clé | Défaut | Rôle |
+|---|---|---|
+| `display.sleep_enabled` | `true` | veille active |
+| `display.sleep_delay_s` | `300` | délai d'inactivité, parmi 60 / 300 / 600 / 1800 |
+| `display.sleep_method` | `"auto"` | `auto`, `vcgencmd`, `xset`, `backlight` ou `none` |
+| `general.screen_diagonal_in` | `5.0` (était `4.3`) | l'écran est choisi (H-6) |
+
+#### Vérifications ajoutées
+
+`tests/test_display_sleep.py` — 13 tests, dont les neuf demandés : déclenchement
+après le délai configuré ; aucune veille quand elle est désactivée ; remise à
+zéro du compteur à chaque interaction ; premier toucher = réveil seul ; premier
+toucher ne déclenchant aucune commande ; acquisitions, chaîne du chauffage et
+alertes qui continuent écran éteint ; délai des Paramètres réellement appliqué.
+Les quatre autres couvrent la désactivation pendant que l'écran dort, une
+méthode d'extinction en panne et une méthode indisponible.
+
+Les délais sont pilotés par une horloge explicite : un test de veille de cinq
+minutes ne dure pas cinq minutes.

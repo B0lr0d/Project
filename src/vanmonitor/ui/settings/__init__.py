@@ -1,4 +1,4 @@
-"""Les cinq sections de la page Paramètres.
+"""Les sections de la page Paramètres.
 
 Rien de technique n'y figure : périodes de scrutation, délais, filtres et
 chemins de fichiers restent dans le fichier de configuration. Le conducteur y

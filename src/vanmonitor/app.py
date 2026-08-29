@@ -22,6 +22,7 @@ from .core.acquisition import AcquisitionService
 from .core.alerts import AlertEngine
 from .core.commands import CommandBus
 from .core.control_loop import ControlWorker
+from .core.display import DisplayController, DisplayWorker
 from .core.services import SnapshotBuilder
 from .core.state import StateStore
 from .hal.factory import HalBundle, build_hal
@@ -42,6 +43,8 @@ class Application:
     builder: SnapshotBuilder
     alerts: AlertEngine
     control: ControlWorker
+    display: DisplayController
+    display_worker: DisplayWorker
     options: Options
     sensor_ids: list[str] = field(default_factory=list)
     #: Associations que la simulation établit d'office (zone → sonde simulée).
@@ -51,12 +54,17 @@ class Application:
     def start(self) -> None:
         self.acquisition.start()
         self.control.start()
+        self.display_worker.start()
         # Un premier tour immédiat : l'écran ne doit pas s'ouvrir vide.
         self.control.tick()
 
     def stop(self) -> None:
         self.control.request_stop()
         self.control.join(timeout=3.0)
+        self.display_worker.request_stop()
+        self.display_worker.join(timeout=3.0)
+        # On ne laisse jamais l'écran noir derrière soi.
+        self.display.shutdown()
         self.acquisition.stop()
         self.config.close()
 
@@ -79,7 +87,11 @@ def build_application(options: Options) -> Application:
     state = StateStore()
     builder = SnapshotBuilder(config, simulation=simulation)
     alerts = AlertEngine(config)
-    control = ControlWorker(acquisition, state, builder, alerts, period_s=1.0)
+    display = DisplayController(_build_display_power(hal, config), config)
+    display_worker = DisplayWorker(display)
+    control = ControlWorker(
+        acquisition, state, builder, alerts, period_s=1.0, display=display,
+    )
 
     return Application(
         config=config,
@@ -90,11 +102,26 @@ def build_application(options: Options) -> Application:
         builder=builder,
         alerts=alerts,
         control=control,
+        display=display,
+        display_worker=display_worker,
         options=options,
         sensor_ids=_available_sensor_ids(simulation),
         implicit_bindings=_implicit_bindings(config, simulation),
         screen_size=options.screen_size,
     )
+
+
+def _build_display_power(hal: HalBundle, config: ConfigStore):
+    """Méthode d'extinction de l'écran, jamais ``None``.
+
+    Le lot matériel la fournit ; s'il n'en a pas (lot construit à la main dans
+    un test), on retombe sur un pilote qui annonce la veille indisponible plutôt
+    que de forcer chaque appelant à tester ``None``.
+    """
+    if hal.display_power is not None:
+        return hal.display_power
+    from .hal.real.display_power import NullDisplayPower
+    return NullDisplayPower("aucune méthode fournie par le lot matériel")
 
 
 def _implicit_bindings(config: ConfigStore, simulation: bool) -> dict:
@@ -179,9 +206,16 @@ def _run_gui(app: Application) -> int:
         return 2
 
     from .ui.main_window import MainWindow
+    from .ui.wake_guard import WakeGuard
 
     qt_app = QApplication(sys.argv[:1])
     window = MainWindow(app)
+
+    # Posé sur l'application entière : tout toucher, où qu'il tombe, repousse
+    # la veille — et le premier toucher sur un écran éteint ne fait que le
+    # rallumer.
+    guard = WakeGuard(app.display, app.display_worker)
+    qt_app.installEventFilter(guard)
 
     fullscreen = (bool(app.config.get("general.fullscreen", True))
                   and not app.options.windowed)
@@ -199,6 +233,7 @@ def _run_gui(app: Application) -> int:
         panel.show()
 
     code = qt_app.exec_()
+    qt_app.removeEventFilter(guard)
     if panel is not None:
         panel.close()
     return code

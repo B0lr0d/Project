@@ -1,4 +1,4 @@
-"""Page Paramètres : un rail de cinq sections à gauche, le contenu à droite.
+"""Page Paramètres : un rail de sections à gauche, le contenu à droite.
 
 Deux niveaux, pas un de plus. Le rail reste visible en permanence : on sait
 toujours où l'on est, et revenir en arrière ne demande jamais de chercher.
@@ -26,6 +26,7 @@ from ..models import SystemSnapshot
 from .layout_profile import LayoutProfile
 from .settings.alerts_settings import AlertsSettings
 from .settings.calibration_settings import CalibrationSettings
+from .settings.display_settings import DisplaySettings
 from .settings.heating_settings import HeatingSettings
 from .settings.history_settings import HistorySettings
 from .settings.sensors_settings import SensorsSettings
@@ -36,6 +37,7 @@ SECTIONS = [
     ("alerts", "Alertes"),
     ("calibration", "Calibration"),
     ("sensors", "Sondes"),
+    ("display", "Écran"),
     ("history", "Historique"),
 ]
 
@@ -88,6 +90,7 @@ class SettingsPage(QWidget):
             "sensors": SensorsSettings(config, sensor_ids, metrics,
                                        implicit_bindings=implicit_bindings,
                                        on_identification=on_identification),
+            "display": DisplaySettings(config, metrics),
             "history": HistorySettings(config, metrics),
         }
 

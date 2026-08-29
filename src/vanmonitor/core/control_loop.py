@@ -22,6 +22,7 @@ from ..util.ratelimit import RateLimitedLogger
 from ..util.timebase import monotonic
 from .acquisition import AcquisitionService
 from .alerts import AlertEngine
+from .display import DisplayController
 from .services import SnapshotBuilder
 from .state import StateStore
 
@@ -40,12 +41,17 @@ class ControlWorker(threading.Thread):
         alerts: AlertEngine,
         *,
         period_s: float | Callable[[], float] = 1.0,
+        display: DisplayController | None = None,
     ) -> None:
         super().__init__(name="control_worker", daemon=True)
         self._acquisition = acquisition
         self._state = state_store
         self._builder = builder
         self._alerts = alerts
+        # La veille n'est ici que pour être publiée : cette boucle ne décide
+        # jamais d'éteindre quoi que ce soit, et ne s'arrête pas quand l'écran
+        # est noir.
+        self._display = display
         self._period = period_s if callable(period_s) else (lambda: float(period_s))
         self._stop_event = threading.Event()
         self._ticks = 0
@@ -93,6 +99,13 @@ class ControlWorker(threading.Thread):
             limited.error("control.alerts", f"évaluation des alertes : {exc}")
             alerts = ()
 
+        display = None
+        if self._display is not None:
+            try:
+                display = self._display.status()
+            except Exception as exc:
+                limited.error("control.display", f"état de la veille : {exc}")
+
         snapshot = SystemSnapshot(
             timestamp=snapshot.timestamp,
             temperatures=snapshot.temperatures,
@@ -102,6 +115,7 @@ class ControlWorker(threading.Thread):
             alerts=alerts,
             available_sensor_ids=snapshot.available_sensor_ids,
             sensor_temperatures=snapshot.sensor_temperatures,
+            display=display,
             simulation=snapshot.simulation,
         )
 

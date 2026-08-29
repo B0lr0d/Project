@@ -48,10 +48,10 @@ def _texts(widget) -> list[str]:
     return [child.text() for child in widget.findChildren(QLabel)]
 
 
-def test_the_five_sections_are_present(window) -> None:
+def test_the_settings_sections_are_present(window) -> None:
     widget, _application = window
     assert [key for key, _text in SECTIONS] == [
-        "heating", "alerts", "calibration", "sensors", "history",
+        "heating", "alerts", "calibration", "sensors", "display", "history",
     ]
     for key, _text in SECTIONS:
         widget.show_settings(key)

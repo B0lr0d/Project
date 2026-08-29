@@ -57,6 +57,19 @@ class AlertLevel(Enum):
     CRITIQUE = "critique"
 
 
+class DisplayState(Enum):
+    """État de l'affichage.
+
+    ``INCONNU`` n'est pas une panne : certaines méthodes d'extinction ne savent
+    pas relire l'état de la dalle. On sait alors ce qu'on a commandé, pas ce
+    que l'écran fait — la même distinction que pour les clapets.
+    """
+
+    ON = "on"
+    OFF = "off"
+    INCONNU = "inconnu"
+
+
 class SensorLossFallback(Enum):
     """Repli appliqué à un circuit dont la température n'est plus fiable.
 

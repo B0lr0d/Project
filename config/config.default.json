@@ -4,7 +4,12 @@
     "simulation": false,
     "fullscreen": true,
     "ui_refresh_hz": 2,
-    "screen_diagonal_in": 4.3
+    "screen_diagonal_in": 5.0
+  },
+  "display": {
+    "sleep_enabled": true,
+    "sleep_delay_s": 300,
+    "sleep_method": "auto"
   },
   "workers": {
     "watchdog_factor": 3,

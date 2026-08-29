@@ -31,7 +31,19 @@ DEFAULTS: dict[str, Any] = {
         # Diagonale physique de la dalle, en pouces. Sert à dimensionner
         # les cibles tactiles en millimètres réels et non en pixels.
         # MATERIEL À INTEGRER PLUS TARD : écran non choisi (H-6).
-        "screen_diagonal_in": 4.3,
+        # Waveshare 5 pouces HDMI LCD (H) V4 : 800 x 480, tactile capacitif,
+        # image par HDMI, tactile par USB, orientation paysage.
+        "screen_diagonal_in": 5.0,
+    },
+
+    "display": {
+        # La veille ne concerne que la dalle : le Raspberry, les acquisitions,
+        # le chauffage et les alertes continuent de tourner.
+        "sleep_enabled": True,
+        "sleep_delay_s": 300,
+        # "auto" essaie vcgencmd, puis xset, puis le rétroéclairage.
+        # Forçable si le comportement réel du Waveshare le demande.
+        "sleep_method": "auto",
     },
 
     "workers": {

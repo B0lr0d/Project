@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from ..constants import ConfirmedState, ValveCommand, ValveState
+from ..constants import ConfirmedState, DisplayState, ValveCommand, ValveState
 from ..models import BatteryReading
 
 
@@ -129,6 +129,41 @@ class SmartShuntInterface(ABC):
 # ---------------------------------------------------------------------------
 # Actionneurs
 # ---------------------------------------------------------------------------
+
+class DisplayPower(ABC):
+    """Extinction et rallumage de l'affichage.
+
+    La veille ne concerne **que la dalle**. Le Raspberry reste actif, les
+    threads d'acquisition tournent, le chauffage régule et les alertes sont
+    évaluées : rien de tout cela ne passe par cette interface.
+
+    L'écran retenu est un Waveshare 5 pouces HDMI LCD (H) V4 : l'image arrive
+    par HDMI, le tactile repart par USB. Les deux liaisons étant distinctes,
+    couper l'image ne coupe pas le tactile — c'est ce qui permet de réveiller
+    l'écran au doigt. La méthode exacte d'extinction dépend en revanche de la
+    pile graphique en place, d'où cette abstraction.
+    """
+
+    @abstractmethod
+    def sleep(self) -> None:
+        """Éteint l'affichage. Lève ``HardwareError`` si la méthode échoue."""
+
+    @abstractmethod
+    def wake(self) -> None:
+        """Rallume l'affichage."""
+
+    @abstractmethod
+    def state(self) -> DisplayState:
+        """État de la dalle, ou ``INCONNU`` si la méthode ne sait pas le relire."""
+
+    @abstractmethod
+    def is_available(self) -> bool:
+        """Faux si aucune méthode d'extinction n'a été trouvée sur ce système."""
+
+    @abstractmethod
+    def describe(self) -> str:
+        """Nom de la méthode employée, pour le journal et le diagnostic."""
+
 
 class ValveDriver(ABC):
     """Pilote d'un clapet de circuit de chauffage.

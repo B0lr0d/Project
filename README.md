@@ -4,7 +4,8 @@ Système de surveillance et de commande pour fourgon aménagé, sur Raspberry Pi
 températures, niveaux, batterie auxiliaire et circuits de chauffage, sur écran
 tactile, **en local, sans Internet**.
 
-État : **étape 4 livrée — gestion des températures.**
+État : **étape 4 livrée — gestion des températures**, plus la **veille de
+l'écran** et le choix de la dalle (Waveshare 5" HDMI LCD (H) V4, 800 × 480).
 L'architecture complète est décrite dans [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ---
@@ -50,7 +51,7 @@ QT_QPA_PLATFORM=offscreen python -m pytest
 Les tests d'interface sont ignorés si PyQt5 est absent ; tout le reste doit
 passer sans lui.
 
-## Trois choses à essayer en priorité
+## Cinq choses à essayer en priorité
 
 1. **Débrancher une sonde** (« Absent » sur une ligne de température) puis en
    mettre une autre en « Erreur de lecture ». L'une affiche `--`, l'autre
@@ -69,6 +70,10 @@ passer sans lui.
    voit tout de suite. Débrancher une sonde depuis le panneau de simulation la
    fait disparaître du bus et marque son association « (absente) », sans
    l'effacer.
+5. **Paramètres → Écran → régler la veille sur 1 min**, puis ne plus toucher
+   l'écran. Seul l'affichage s'éteint : les acquisitions, le chauffage et les
+   alertes continuent, et le premier appui sur l'écran noir ne fait que le
+   rallumer — il ne déclenche pas le bouton qui se trouvait sous le doigt.
 
 Le mode « Bloqué (chien de garde) » est le plus instructif : il reproduit un
 pilote qui ne rend jamais la main. Le thread concerné est déclaré bloqué,
@@ -96,8 +101,15 @@ définir (broche, longueur de bus, résistance de tirage : H-5).
 Confirmé, pas encore implémenté : Victron SmartShunt en VE.Direct filaire via
 une interface VE.Direct/USB (étape 6). Réservoir de gasoil de 105 L.
 
+Écran retenu : **Waveshare 5 pouces HDMI LCD (H) V4** — 800 × 480, tactile
+capacitif, image par HDMI, tactile par USB, paysage. L'image et le tactile
+empruntant deux liaisons distinctes, couper le HDMI n'empêche pas le doigt de
+réveiller l'écran. La commande d'extinction exacte, elle, dépend de la pile
+graphique installée : trois méthodes sont essayées (`vcgencmd`, `xset dpms`,
+`/sys/class/backlight`) et `display.sleep_method` permet d'en imposer une.
+
 Non encore choisi, et donc **jamais supposé** dans le code : capteurs de niveau,
-convertisseur analogique-numérique, actionneurs des clapets, modèle d'écran.
+convertisseur analogique-numérique, actionneurs des clapets.
 Les modules correspondants existent sous `hal/real/`, portent la mention
 `MATERIEL À INTEGRER PLUS TARD` et lèvent proprement `NotImplementedError`.
 

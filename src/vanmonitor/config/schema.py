@@ -153,6 +153,14 @@ def validate(raw: Any) -> tuple[dict[str, Any], list[str]]:
     _check_number(general, "screen_diagonal_in", general_defaults, warnings, "general",
                   minimum=2.0, maximum=32.0)
 
+    # --- affichage ------------------------------------------------------
+    display, display_defaults = config["display"], defaults["display"]
+    _check_bool(display, "sleep_enabled", display_defaults, warnings, "display")
+    _check_number(display, "sleep_delay_s", display_defaults, warnings, "display",
+                  minimum=10, maximum=86400)
+    _check_choice(display, "sleep_method", display_defaults, warnings, "display",
+                  {"auto", "vcgencmd", "xset", "backlight", "none"})
+
     # --- threads d'acquisition -----------------------------------------
     workers, workers_defaults = config["workers"], defaults["workers"]
     _check_number(workers, "watchdog_factor", workers_defaults, warnings, "workers",
